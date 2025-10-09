@@ -1,3 +1,3 @@
 ## SOVEREIGNTY
 
-The home of stablecoins
+One protocol to rule them all 
