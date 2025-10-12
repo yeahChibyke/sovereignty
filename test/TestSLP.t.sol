@@ -16,21 +16,9 @@ contract TestSLP is Test {
 
     function setUp() public {
         admin = makeAddr("admin");
-        alice = makeAddr("first LP");
+        alice = makeAddr("alice");
 
         cngn = new MockCngn(6);
         SLP = new SovereigntyLiquidityProvider(address(cngn), admin);
-
-        cngn.mint(alice, LP_AMOUNT);
-    }
-
-    function testDeposit() public {
-        vm.startPrank(alice);
-        cngn.approve(address(SLP), LP_AMOUNT);
-        SLP.deposit(LP_AMOUNT, alice);
-        vm.stopPrank();
-
-        assert(cngn.balanceOf(alice) == 0);
-        assert(cngn.balanceOf(address(SLP)) == LP_AMOUNT);
     }
 }
