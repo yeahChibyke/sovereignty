@@ -8,8 +8,14 @@ interface ICollateralManager {
         uint256 lastUpdatedAt;
     }
 
-    event DepositCreated(address indexed user, uint256 amount, uint256 depositedAt);
+    event DepositCreated(address indexed user, uint256 indexed amount, uint256 indexed depositedAt);
+    event FundsWithdrawn(address indexed user, uint256 indexed amount, uint256 indexed withdrawnAt);
+    event LossesWithdrawn(address indexed to, uint256 indexed amount, uint256 indexed withdrawnAt);
     event UpdatedUserDeposit(address indexed user, uint256 amount, uint256 updatedAt);
+
+    error CollateralManager__InvalidDeposit();
+    error CollateralManager__PositionStillOpen();
+    error CollateralManager__LowBalance();
 
     /**
      * @return -
