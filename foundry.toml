@@ -18,6 +18,7 @@ exclude_lints = [
   "screaming-snake-case-const",
   "unaliased-plain-import",
   "unused-import",
+  "unwrapped-modifier-logic",
 ]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
