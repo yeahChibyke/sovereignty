@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -15,7 +15,7 @@ contract SovereigntyCollateralManager is Ownable, ICollateralManager {
     mapping(address depositor => Deposit) private userDeposits;
     uint256 public totalDeposits;
 
-    uint256 public constant MIN_DEPOSIT = 100_000e5; // 100_000 cngn
+    uint256 public constant MIN_DEPOSIT = 10_000e5; // 10_000 cngn
 
     constructor(address _cngn, address _positionManager) Ownable(msg.sender) {
         collateralToken = _cngn;
