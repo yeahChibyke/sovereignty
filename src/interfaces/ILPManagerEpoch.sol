@@ -49,7 +49,9 @@ interface ILPManagerEpoch {
     event TradeLayerClosed(uint256 indexed layerId, uint256 profitLoss, bool isProfit);
 
     // ============= Errors =============
-    error BadSplitState();
-    error MustMaterializeSequentially();
-    error ZeroAddress();
+    error LPManager__BadSplitState();
+    error LPManager__MustMaterializeSequentially();
+    error LPManager__ZeroAddress();
+    error LPManager__InvalidDeposit();
+    error LPManager__ZeroAmount();
 }
