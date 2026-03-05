@@ -1,27 +1,43 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.20;
 
+// ------------------------------------------------------------------
+//                             IMPORTS
+// ------------------------------------------------------------------
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IPositionManager} from "./interfaces/IPositionManager.sol";
 import {ICollateralManager} from "./interfaces/ICollateralManager.sol";
 
+// Collect cNGN and save the amounts of each deposit of the users
 contract SovereigntyCollateralManager is Ownable, ICollateralManager {
+    // ------------------------------------------------------------------
+    //                              TYPES
+    // ------------------------------------------------------------------
     using SafeERC20 for IERC20;
 
+    // ------------------------------------------------------------------
+    //                             STORAGE
+    // ------------------------------------------------------------------
     address collateralToken;
     IPositionManager positionManager;
     mapping(address depositor => Deposit) private userDeposits;
     uint256 public totalDeposits;
 
-    uint256 public constant MIN_DEPOSIT = 10_000e5; // 10_000 cngn
+    uint256 public constant MIN_DEPOSIT = 10_000e6; // 10_000 cngn
 
+    // ------------------------------------------------------------------
+    //                           CONSTRUCTOR
+    // ------------------------------------------------------------------
     constructor(address _cngn, address _positionManager) Ownable(msg.sender) {
         collateralToken = _cngn;
         positionManager = IPositionManager(_positionManager);
     }
 
+    // ------------------------------------------------------------------
+    //                            MODIFIERS
+    // ------------------------------------------------------------------
     modifier validDeposit(uint256 _amount) {
         if (_amount < MIN_DEPOSIT) {
             revert CollateralManager__InvalidDeposit();
@@ -38,6 +54,9 @@ contract SovereigntyCollateralManager is Ownable, ICollateralManager {
         _;
     }
 
+    // ------------------------------------------------------------------
+    //                        DEPOSIT / WITHDRAW
+    // ------------------------------------------------------------------
     function deposit(uint256 _amount) external validDeposit(_amount) {
         totalDeposits += _amount;
 
@@ -62,15 +81,13 @@ contract SovereigntyCollateralManager is Ownable, ICollateralManager {
         emit FundsWithdrawn(msg.sender, _amount, block.timestamp);
     }
 
+    // ------------------------------------------------------------------
+    //                          OWNER FUNCTIONS
+    // ------------------------------------------------------------------
     function withdrawLosses(address _to, uint256 _amount) external onlyOwner {
         IERC20(collateralToken).safeTransfer(_to, _amount);
 
         emit LossesWithdrawn(_to, _amount, block.timestamp);
-    }
-
-    function getUserDeposit(address user) external view returns (address, uint256, uint256) {
-        Deposit memory userDeposit = userDeposits[user];
-        return (userDeposit.user, userDeposit.amount, userDeposit.lastUpdatedAt);
     }
 
     function updateUserDeposit(address user, uint256 amount, bool isIncreasing) public onlyOwner {
@@ -84,5 +101,13 @@ contract SovereigntyCollateralManager is Ownable, ICollateralManager {
         }
         userDeposit.lastUpdatedAt = block.timestamp;
         emit UpdatedUserDeposit(user, amount, block.timestamp);
+    }
+
+    // ------------------------------------------------------------------
+    //                         GETTER FUNCTIONS
+    // ------------------------------------------------------------------
+    function getUserDeposit(address user) external view returns (address, uint256, uint256) {
+        Deposit memory userDeposit = userDeposits[user];
+        return (userDeposit.user, userDeposit.amount, userDeposit.lastUpdatedAt);
     }
 }
