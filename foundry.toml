@@ -2,24 +2,25 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-
-remappings = [
-  "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
-  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-  "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
-  "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
-]
+via_ir = true
 
 [lint]
 exclude_lints = [
-  "mixed-case-variable",
-  "pascal-case-struct",
-  "screaming-snake-case-immutable",
-  "mixed-case-function",
-  "screaming-snake-case-const",
-  "unaliased-plain-import",
-  "unused-import",
-  "unwrapped-modifier-logic",
+    "screaming-snake-case-const",
+    "screaming-snake-case-immutable",
+    "mixed-case-variable",
+    "erc20-unchecked-transfer",
+    "unused-import",
+    "unsafe-typecast",
+    "asm-keccak256",
+    "mixed-case-function",
+    "pascal-case-struct",
+    "unwrapped-modifier-logic",
+]
+
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@chainlink/=lib/chainlink-evm/",
 ]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
