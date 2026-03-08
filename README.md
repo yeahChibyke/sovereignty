@@ -14,20 +14,17 @@ The architecture is split into two core smart contracts:
 As a trader, you can open **Long** or **Short** positions on markets like BTC/cNGN, ETH/cNGN, and SOL/cNGN.
 * **Margin & Risk:** All margin is posted in `cNGN`. You have full control to dynamically **Add Collateral** (to defend against wicks and lower leverage) or **Remove Collateral** (to extract profits early) on live positions.
 * **Leverage:** Up to 5x leverage. Maximize your exposure to price movements safely.
-* **Funding Rates:** Real-time, continuous funding rates based on the Long/Short Open Interest balance.
-* **Fair Pricing:** Prices are protected from local manipulation via Chainlink oracle triangulation.
+* **Funding Rates:** Enjoy fair and low funding rates based on the Long/Short Open Interest balance, carefully scaled to prevent aggressive continuous decay.
+* **Fair Pricing:** Prices are protected from local manipulation and flash loans via secure Chainlink oracle triangulation, ensuring accurate and tamper-proof execution.
 
 ### 2. Liquidity Providers (LPs)
-LPs deposit `cNGN` into the `cNGNVault` to earn a share of the platform's volume and trader losses. 
-* Your deposit underwrites the protocol. If traders win, the vault pays out. If traders lose, their losses are added directly to the vault, growing your share value.
-* Yield is auto-compounding. The share price of `vcNGN` dynamically reflects the **Global Unrealized PnL** of all active traders, protecting the Vault from LP front-running and ensuring exact share pricing before trades are settled.
+LPs deposit `cNGN` into the `cNGNVault` to earn a share of the platform's volume and trader losses. The protocol is uniquely designed to maximize LP yield:
+* **Yield Capture from Protocol Liquidations:** Unlike traditional systems that leak value to external bots, this protocol uses Chainlink Automation to execute liquidations internally. The typical 1% liquidation bounty is captured directly by the Vault, instantly increasing the `cNGN` backing your shares.
+* **Counterparty to Traders:** Your deposit underwrites the protocol. If traders win, the vault pays out. If traders lose, their losses are added directly to the vault, growing your share value.
+* **Auto-compounding & MEV-Resistant:** Yield is auto-compounding. The share price of `vcNGN` dynamically reflects the **Global Unrealized PnL** of all active traders, protecting the Vault from LP front-running and ensuring exact share pricing before trades are settled.
 
-### 3. Liquidators
-Keep the protocol safe! Anyone can monitor positions and liquidate underwater trades (positions where margin drops below the 2% Maintenance Margin). Liquidators earn a **1% bounty** on the remaining collateral as a reward.
-
----
-
-## 🌊 Project Flow & Lifecycle
+### 3. Liquidators & Automation
+Keep the protocol safe! While anyone can monitor positions and liquidate underwater trades, the protocol natively implements **Protocol-Owned Liquidations** via Chainlink Automation to secure the system and capture value for LPs.
 
 Here is the step-by-step flow of how actions are processed in the system.
 
@@ -51,11 +48,13 @@ While a position is active, traders can manage their isolated risk in real-time.
     * If profitable, the vault sends `cNGN` to the trader. 
     * If at a loss, the vault absorbs the trader's collateral minus what is safely returned to them.
 
-### Phase 4: Liquidation (If needed)
-If a trader's `Equity` vs `Position Size` drops below the 2% Maintenance Margin ratio:
-1. A liquidator calls `liquidate(asset, trader)`.
-2. The DEX forcefully closes the position at the current mark price.
-3. The liquidator is instantly paid a **1% collateral bounty**, the Vault absorbs the remainder, and the position is wiped cleanly.
+### Phase 4: Protocol-Owned Liquidations (Automation)
+If a trader's `Equity` vs `Position Size` drops below the 2% Maintenance Margin ratio, they must be liquidated to prevent bad debt inside the Vault.
+The system natively executes **Protocol-Owned Liquidations**:
+1. Chainlink Automation Nodes query `checkUpkeep`, which iterates actively over the recorded `tradersPerAsset` set up to a defined gas ceiling.
+2. If underwater traders are found, the node triggers `performUpkeep`.
+3. The DEX forcefully closes those positions at the current mark price by triangulating the freshest feeds.
+4. **Yield Capture:** Instead of routing the **1% collateral bounty** to external MEV bots, the protocol intercepts it (by validating the `liquidationForwarder` via a Forwarder pattern) and injects the bounty straight back into the `cNGNVault`, rewarding LPs with pure organic yield. Any remaining collateral is absorbed by the Vault, and the position is cleanly wiped.
 
 ---
 
@@ -79,6 +78,12 @@ The Vault conforms strictly to OpenZeppelin's `ERC4626`. However, standard vault
 * **ReentrancyGuard**: Applied to all execution and settlement functions.
 * **SafeERC20**: Revert-safe token transfers.
 * **Ownable2Step**: Secure 2-step administration transfers for setting oracle config.
+
+### 4. Protocol-Owned Liquidations & Yield Capture
+Instead of external snipers extracting the risk-averse liquidator bounties from the Vault's capacity, `PerpDEX` implements a highly optimized internal liquidation engine to protect LPs:
+* **Active Trader Set Profiling:** As positions open (`executeTrade`), traders are dynamically pushed to the `tradersPerAsset[asset]` array. When positions close completely, they are efficiently swapped and popped out. This bounded set ensures that external computation (`checkUpkeep`) doesn't spin endlessly on stale data.
+* **Forwarder Pattern Verification:** Utilizing Chainlink Automation 2.1 (`AutomationCompatibleInterface`), the Vault maps a registered `liquidationForwarder`. During `_closePosition`, the contract performs an `isProtocolLiquidation` check: if `msg.sender == liquidationForwarder`, the standard 1% `LIQUIDATION_BOUNTY_RATIO` is withheld and diverted directly back to Vault asset capacity instead of paying external EOAs.
+* **Gas-Optimized Upkeeps:** The `checkUpkeep` logic iterates active positions per asset up to a strict bound (e.g., `MAX_LIQUIDATION_BATCH = 10`), validating the equation: `equity * 100 < size * MAINTENANCE_MARGIN_RATIO`. Within `performUpkeep`, the current oracle price is queried exactly once per asset and passed downwards to sub-routines, avoiding redundant gas-intensive feed calls for multiple traders in a single batch.
 
 ---
 

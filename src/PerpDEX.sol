@@ -7,13 +7,16 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "chainlink-evm/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {
+    AutomationCompatibleInterface
+} from "chainlink-evm/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 import {cNGNVault} from "./cNGNVault.sol";
 
 /// @title PerpDEX
 /// @notice Perpetual futures trading engine for BTC/cNGN, ETH/cNGN, SOL/cNGN.
 ///         Uses Chainlink triangulation (Asset/USD ÷ NGN/USD), continuous funding,
-///         commit-reveal order flow, and public liquidation with bounties.
-contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
+///         commit-reveal order flow, Chainlink Automation liquidations, and public liquidation with bounties.
+contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable, AutomationCompatibleInterface {
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////
@@ -44,6 +47,9 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
     /// @notice Funding rate scaling factor per second (~0.0001% per second at max imbalance).
     /// Targets ~0.09% per day at full imbalance, comparable to DeFi perpetual standards.
     uint256 public constant FUNDING_RATE_PER_SECOND = 1e10;
+
+    /// @notice Maximum number of liquidations per performUpkeep batch.
+    uint256 public constant MAX_LIQUIDATION_BATCH = 10;
 
     /*//////////////////////////////////////////////////////////////
                                 ENUMS
@@ -115,6 +121,15 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
     /// @notice Total trader collateral currently held by the vault (token precision, 6 dec).
     uint256 public totalCollateralHeld;
 
+    /// @notice Chainlink Automation forwarder address (set after upkeep registration).
+    address public liquidationForwarder;
+
+    /// @notice asset => list of traders with open positions.
+    mapping(address => address[]) public tradersPerAsset;
+
+    /// @notice asset => trader => index+1 in tradersPerAsset (0 = not present).
+    mapping(address => mapping(address => uint256)) internal _traderIndex;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -132,6 +147,8 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
     event FundingUpdated(address indexed asset, int256 newFundingIndex);
     event CollateralAdded(address indexed trader, address indexed asset, uint256 amount);
     event CollateralRemoved(address indexed trader, address indexed asset, uint256 amount);
+    event ForwarderSet(address indexed forwarder);
+    event AutomatedLiquidation(address indexed trader, address indexed asset, uint256 yieldCaptured);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -152,6 +169,7 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
     error InvalidSide();
     error InsufficientEquity();
     error ExceedsLeverageAfterRemoval();
+    error OnlyForwarder();
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -194,6 +212,13 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Set the Chainlink Automation forwarder address.
+    ///         Called by the admin after registering the upkeep.
+    function setForwarder(address _forwarder) external onlyOwner {
+        liquidationForwarder = _forwarder;
+        emit ForwarderSet(_forwarder);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -357,6 +382,9 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
             moi.shortOI += size;
         }
 
+        // --- Track trader in asset's trader set ---
+        _addTrader(_asset, msg.sender);
+
         emit PositionOpened(msg.sender, _asset, _side, size, _collateral, markPrice);
     }
 
@@ -440,7 +468,13 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
         _updateFunding(_asset);
 
         uint256 markPrice = _getMarkPrice(_asset);
-        int256 pnl = _calculatePnL(pos, markPrice);
+        _validateAndLiquidate(_asset, _trader, markPrice, msg.sender);
+    }
+
+    /// @notice Internal: verify maintenance margin breach and close.
+    function _validateAndLiquidate(address _asset, address _trader, uint256 _markPrice, address _liquidator) internal {
+        Position storage pos = positions[_asset][_trader];
+        int256 pnl = _calculatePnL(pos, _markPrice);
         int256 funding = _pendingFunding(_asset, pos);
         int256 netPnL = pnl - funding;
 
@@ -453,7 +487,7 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
             revert NotLiquidatable();
         }
 
-        _closePosition(_asset, _trader, true, msg.sender);
+        _closePosition(_asset, _trader, true, _liquidator);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -508,6 +542,7 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
         }
 
         uint256 bounty;
+        bool isProtocolLiquidation = _isLiquidation && _liquidator == liquidationForwarder;
         if (_isLiquidation && traderReceives > 0) {
             bounty = (traderReceives * LIQUIDATION_BOUNTY_RATIO) / PRECISION;
             traderReceives -= bounty;
@@ -522,15 +557,23 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
             vault.payTrader(_trader, traderReceives);
         }
 
-        // Pay liquidator bounty
-        if (bounty > 0) {
+        // Pay liquidator bounty (external only; for protocol liquidations bounty stays in vault)
+        if (bounty > 0 && !isProtocolLiquidation) {
             vault.payTrader(_liquidator, bounty);
         }
 
-        // Clear position
+        // Clear position and remove from trader set
         delete positions[_asset][_trader];
+        _removeTrader(_asset, _trader);
 
         if (_isLiquidation) {
+            if (isProtocolLiquidation) {
+                // Yield captured = what would have been the bounty
+                uint256 yieldCaptured = traderReceives > 0
+                    ? ((_fromInternalPrecision(uint256(equity)) * LIQUIDATION_BOUNTY_RATIO) / PRECISION)
+                    : 0;
+                emit AutomatedLiquidation(_trader, _asset, yieldCaptured);
+            }
             emit PositionLiquidated(_trader, _asset, _liquidator, bounty, markPrice);
         } else {
             emit PositionClosed(_trader, _asset, realisedPnLTokens, markPrice);
@@ -613,6 +656,145 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
             return int256(_fromInternalPrecision(uint256(_pnl)));
         } else {
             return -int256(_fromInternalPrecision(uint256(-_pnl)));
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     TRADER SET MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Add a trader to an asset's trader set (idempotent).
+    function _addTrader(address _asset, address _trader) internal {
+        if (_traderIndex[_asset][_trader] != 0) return; // already tracked
+        tradersPerAsset[_asset].push(_trader);
+        _traderIndex[_asset][_trader] = tradersPerAsset[_asset].length; // store index+1
+    }
+
+    /// @notice Remove a trader from an asset's trader set (swap-and-pop).
+    function _removeTrader(address _asset, address _trader) internal {
+        uint256 indexPlusOne = _traderIndex[_asset][_trader];
+        if (indexPlusOne == 0) return; // not tracked
+
+        uint256 lastIndex = tradersPerAsset[_asset].length - 1;
+        uint256 removeIndex = indexPlusOne - 1;
+
+        if (removeIndex != lastIndex) {
+            address lastTrader = tradersPerAsset[_asset][lastIndex];
+            tradersPerAsset[_asset][removeIndex] = lastTrader;
+            _traderIndex[_asset][lastTrader] = indexPlusOne;
+        }
+
+        tradersPerAsset[_asset].pop();
+        delete _traderIndex[_asset][_trader];
+    }
+
+    /// @notice Get the count of traders with open positions on an asset.
+    function tradersPerAssetLength(address _asset) external view returns (uint256) {
+        return tradersPerAsset[_asset].length;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                   CHAINLINK AUTOMATION 2.1
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Called off-chain by Chainlink Automation nodes to detect liquidatable positions.
+    ///         Returns up to MAX_LIQUIDATION_BATCH (asset, trader) pairs.
+    function checkUpkeep(
+        bytes calldata /* checkData */
+    )
+        external
+        view
+        override
+        returns (bool upkeepNeeded, bytes memory performData)
+    {
+        address[] memory assets = new address[](MAX_LIQUIDATION_BATCH);
+        address[] memory traders = new address[](MAX_LIQUIDATION_BATCH);
+        uint256 count;
+
+        for (uint256 i = 0; i < supportedAssets.length && count < MAX_LIQUIDATION_BATCH; i++) {
+            address asset = supportedAssets[i];
+            MarketOI storage moi = marketOI[asset];
+            if (moi.longOI == 0 && moi.shortOI == 0) continue;
+
+            uint256 markPrice = _getMarkPrice(asset);
+            uint256 traderCount = tradersPerAsset[asset].length;
+
+            for (uint256 j = 0; j < traderCount && count < MAX_LIQUIDATION_BATCH; j++) {
+                address trader = tradersPerAsset[asset][j];
+                Position storage pos = positions[asset][trader];
+                if (pos.size == 0) continue;
+
+                int256 pnl = _calculatePnL(pos, markPrice);
+                int256 funding = _pendingFunding(asset, pos);
+                int256 netPnL = pnl - funding;
+
+                uint256 collateralScaled = _toInternalPrecision(pos.collateral);
+                int256 equity = int256(collateralScaled) + netPnL;
+
+                bool liquidatable = equity < 0 || uint256(equity) * PRECISION < MAINTENANCE_MARGIN_RATIO * pos.size;
+
+                if (liquidatable) {
+                    assets[count] = asset;
+                    traders[count] = trader;
+                    count++;
+                }
+            }
+        }
+
+        if (count > 0) {
+            // Trim arrays to actual count
+            address[] memory trimmedAssets = new address[](count);
+            address[] memory trimmedTraders = new address[](count);
+            for (uint256 k = 0; k < count; k++) {
+                trimmedAssets[k] = assets[k];
+                trimmedTraders[k] = traders[k];
+            }
+            upkeepNeeded = true;
+            performData = abi.encode(trimmedAssets, trimmedTraders);
+        }
+    }
+
+    /// @notice Called by Chainlink Automation forwarder to execute batched liquidations.
+    ///         Each liquidation is wrapped in a conditional check for resilience.
+    function performUpkeep(bytes calldata performData) external override nonReentrant whenNotPaused {
+        if (msg.sender != liquidationForwarder) revert OnlyForwarder();
+
+        (address[] memory assets, address[] memory traders) = abi.decode(performData, (address[], address[]));
+
+        // Cache mark prices per unique asset for gas efficiency
+        address lastAsset;
+        uint256 cachedMarkPrice;
+        bool fundingUpdated;
+
+        for (uint256 i = 0; i < assets.length; i++) {
+            address asset = assets[i];
+            address trader = traders[i];
+
+            // Refresh cache when asset changes
+            if (asset != lastAsset) {
+                lastAsset = asset;
+                _updateFunding(asset);
+                cachedMarkPrice = _getMarkPrice(asset);
+                fundingUpdated = true;
+            }
+
+            // Resilient: skip if position was already closed or is now healthy
+            Position storage pos = positions[asset][trader];
+            if (pos.size == 0) continue;
+
+            int256 pnl = _calculatePnL(pos, cachedMarkPrice);
+            int256 funding = _pendingFunding(asset, pos);
+            int256 netPnL = pnl - funding;
+
+            uint256 collateralScaled = _toInternalPrecision(pos.collateral);
+            int256 equity = int256(collateralScaled) + netPnL;
+
+            bool stillLiquidatable = equity < 0 || uint256(equity) * PRECISION < MAINTENANCE_MARGIN_RATIO * pos.size;
+
+            if (!stillLiquidatable) continue;
+
+            // Execute liquidation — forwarder is the liquidator (yield capture)
+            _closePosition(asset, trader, true, liquidationForwarder);
         }
     }
 

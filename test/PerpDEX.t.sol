@@ -1849,4 +1849,368 @@ contract PerpDEXTest is Test {
         PerpDEX.Position memory pos2 = perp.getPosition(BTC, trader1);
         assertEq(pos2.collateral, 100_000 * ONE_TOKEN);
     }
+
+    /*//////////////////////////////////////////////////////////////
+       SECTION: CHAINLINK AUTOMATION (PROTOCOL-OWNED LIQUIDATIONS)
+    //////////////////////////////////////////////////////////////*/
+
+    // ───────────── Forwarder Admin ─────────────
+
+    function test_setForwarder_success() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+        assertEq(perp.liquidationForwarder(), fwd);
+    }
+
+    function test_setForwarder_onlyOwner() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, trader1));
+        vm.prank(trader1);
+        perp.setForwarder(makeAddr("fwd"));
+    }
+
+    function test_setForwarder_emitsEvent() public {
+        address fwd = makeAddr("forwarder");
+        vm.expectEmit(true, false, false, false);
+        emit PerpDEX.ForwarderSet(fwd);
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+    }
+
+    function test_setForwarder_canUpdate() public {
+        address fwd1 = makeAddr("fwd1");
+        address fwd2 = makeAddr("fwd2");
+        vm.prank(owner);
+        perp.setForwarder(fwd1);
+        vm.prank(owner);
+        perp.setForwarder(fwd2);
+        assertEq(perp.liquidationForwarder(), fwd2);
+    }
+
+    // ───────────── Trader Set Tracking ─────────────
+
+    function test_traderSet_addedOnOpen() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 2);
+        assertEq(perp.tradersPerAssetLength(BTC), 1);
+        assertEq(perp.tradersPerAsset(BTC, 0), trader1);
+    }
+
+    function test_traderSet_removedOnClose() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 2);
+        assertEq(perp.tradersPerAssetLength(BTC), 1);
+
+        vm.prank(trader1);
+        perp.closePosition(BTC);
+        assertEq(perp.tradersPerAssetLength(BTC), 0);
+    }
+
+    function test_traderSet_multipleTraders() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 2);
+        _commitAndExecute(trader2, BTC, PerpDEX.Side.Short, 100_000 * ONE_TOKEN, 2);
+        assertEq(perp.tradersPerAssetLength(BTC), 2);
+
+        // Close one — should swap-and-pop, leaving 1
+        vm.prank(trader1);
+        perp.closePosition(BTC);
+        assertEq(perp.tradersPerAssetLength(BTC), 1);
+        assertEq(perp.tradersPerAsset(BTC, 0), trader2);
+    }
+
+    function test_traderSet_removedOnLiquidation() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+        assertEq(perp.tradersPerAssetLength(BTC), 1);
+
+        // Drop price to make liquidatable (>18% drop at 5x)
+        btcUsdFeed.setAnswer(48_000e8); // -20%
+
+        vm.prank(liquidator);
+        perp.liquidate(BTC, trader1);
+        assertEq(perp.tradersPerAssetLength(BTC), 0);
+    }
+
+    function test_traderSet_independentAcrossAssets() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 2);
+        _commitAndExecute(trader1, ETH, PerpDEX.Side.Short, 50_000 * ONE_TOKEN, 3);
+
+        assertEq(perp.tradersPerAssetLength(BTC), 1);
+        assertEq(perp.tradersPerAssetLength(ETH), 1);
+
+        vm.prank(trader1);
+        perp.closePosition(BTC);
+        assertEq(perp.tradersPerAssetLength(BTC), 0);
+        assertEq(perp.tradersPerAssetLength(ETH), 1); // ETH unaffected
+    }
+
+    // ───────────── checkUpkeep ─────────────
+
+    function test_checkUpkeep_noPositions() public {
+        (bool needed,) = perp.checkUpkeep("");
+        assertFalse(needed);
+    }
+
+    function test_checkUpkeep_healthyPosition() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 2);
+        (bool needed,) = perp.checkUpkeep("");
+        assertFalse(needed);
+    }
+
+    function test_checkUpkeep_detectsLiquidatable() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+
+        // Drop BTC 20% → equity wiped
+        btcUsdFeed.setAnswer(48_000e8);
+
+        (bool needed, bytes memory performData) = perp.checkUpkeep("");
+        assertTrue(needed);
+
+        (address[] memory assets, address[] memory traders) = abi.decode(performData, (address[], address[]));
+        assertEq(assets.length, 1);
+        assertEq(assets[0], BTC);
+        assertEq(traders[0], trader1);
+    }
+
+    function test_checkUpkeep_batchesMultiple() public {
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+        _commitAndExecute(trader2, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+
+        // Drop 20% → both liquidatable
+        btcUsdFeed.setAnswer(48_000e8);
+
+        (bool needed, bytes memory performData) = perp.checkUpkeep("");
+        assertTrue(needed);
+
+        (address[] memory assets, address[] memory traders) = abi.decode(performData, (address[], address[]));
+        assertEq(assets.length, 2);
+        assertEq(traders.length, 2);
+    }
+
+    function test_checkUpkeep_maxBatchCap() public {
+        // Create 12 traders (exceeds MAX_LIQUIDATION_BATCH of 10)
+        for (uint256 i = 1; i <= 12; i++) {
+            address t = makeAddr(string(abi.encodePacked("traderBatch", vm.toString(i))));
+            token.mint(t, 500_000 * ONE_TOKEN);
+            vm.prank(t);
+            token.approve(address(perp), type(uint256).max);
+            _commitAndExecute(t, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+        }
+
+        // Drop 20%
+        btcUsdFeed.setAnswer(48_000e8);
+
+        (bool needed, bytes memory performData) = perp.checkUpkeep("");
+        assertTrue(needed);
+
+        (address[] memory assets,) = abi.decode(performData, (address[], address[]));
+        assertEq(assets.length, 10, "Batch capped at MAX_LIQUIDATION_BATCH");
+    }
+
+    // ───────────── performUpkeep ─────────────
+
+    function test_performUpkeep_onlyForwarder() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        // Non-forwarder should revert
+        vm.expectRevert(PerpDEX.OnlyForwarder.selector);
+        vm.prank(trader1);
+        perp.performUpkeep(abi.encode(new address[](0), new address[](0)));
+    }
+
+    function test_performUpkeep_executesLiquidation() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+
+        // Drop 20%
+        btcUsdFeed.setAnswer(48_000e8);
+
+        (bool needed, bytes memory performData) = perp.checkUpkeep("");
+        assertTrue(needed);
+
+        // Execute as forwarder
+        vm.prank(fwd);
+        perp.performUpkeep(performData);
+
+        // Position should be closed
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.size, 0);
+        assertEq(perp.tradersPerAssetLength(BTC), 0);
+    }
+
+    function test_performUpkeep_yieldCapture_noBountyPaid() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // Drop ~18.5%: loss = 92.5k, equity = 7.5k (< 10k maintenance) but still positive
+        btcUsdFeed.setAnswer(48_900e8);
+
+        uint256 vaultBalBefore = token.balanceOf(address(vault));
+
+        // Grab perform data
+        (, bytes memory performData) = perp.checkUpkeep("");
+
+        // Execute as forwarder (protocol liquidation)
+        vm.prank(fwd);
+        perp.performUpkeep(performData);
+
+        uint256 vaultBalAfter = token.balanceOf(address(vault));
+
+        // Verify position is closed
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.size, 0);
+
+        // The vault balance should have decreased (paid trader their equity)
+        // but NOT by the extra 1% bounty portion, since that stays in vault
+        assertLt(vaultBalAfter, vaultBalBefore, "Vault pays out trader equity");
+    }
+
+    function test_performUpkeep_externalLiquidation_paysBounty() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // Drop ~18.5%: equity positive but below maintenance
+        btcUsdFeed.setAnswer(48_900e8);
+
+        uint256 liquidatorBefore = token.balanceOf(liquidator);
+
+        vm.prank(liquidator);
+        perp.liquidate(BTC, trader1);
+
+        uint256 liquidatorAfter = token.balanceOf(liquidator);
+        assertGt(liquidatorAfter, liquidatorBefore, "External liquidator should receive bounty");
+    }
+
+    function test_performUpkeep_protocolVsExternal_yieldDifference() public {
+        // Use a price that leaves some positive equity but is below maintenance margin
+        // At 5x with 100k: size=500k, maintenance=10k. ~18.5% drop → equity ≈ 7.5k (liquidatable)
+        int256 liqPrice = 48_900e8;
+
+        // Test 1: External liquidation
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+        btcUsdFeed.setAnswer(liqPrice);
+
+        uint256 vaultBefore1 = token.balanceOf(address(vault));
+        vm.prank(liquidator);
+        perp.liquidate(BTC, trader1);
+        uint256 vaultAfterExternal = token.balanceOf(address(vault));
+        uint256 externalNetChange = vaultBefore1 - vaultAfterExternal;
+
+        // Reset price for test 2
+        btcUsdFeed.setAnswer(BTC_USD);
+
+        // Test 2: Protocol-owned liquidation
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        _commitAndExecute(trader2, BTC, PerpDEX.Side.Long, collateral, 5);
+        btcUsdFeed.setAnswer(liqPrice);
+
+        uint256 vaultBefore2 = token.balanceOf(address(vault));
+        (, bytes memory performData) = perp.checkUpkeep("");
+        vm.prank(fwd);
+        perp.performUpkeep(performData);
+        uint256 vaultAfterProtocol = token.balanceOf(address(vault));
+        uint256 protocolNetChange = vaultBefore2 - vaultAfterProtocol;
+
+        // Protocol liquidation should leave MORE in the vault (bounty retained)
+        assertLt(protocolNetChange, externalNetChange, "Protocol liquidation retains the bounty in vault");
+    }
+
+    function test_performUpkeep_resilient_skipsHealthy() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+        _commitAndExecute(trader2, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+
+        btcUsdFeed.setAnswer(48_000e8); // both liquidatable
+
+        (, bytes memory performData) = perp.checkUpkeep("");
+
+        // Trader1 adds collateral to become healthy before performUpkeep executes
+        token.mint(trader1, 500_000 * ONE_TOKEN);
+        vm.prank(trader1);
+        token.approve(address(perp), type(uint256).max);
+        vm.prank(trader1);
+        perp.addCollateral(BTC, 500_000 * ONE_TOKEN);
+
+        // performUpkeep should skip trader1 (now healthy) and still liquidate trader2
+        vm.prank(fwd);
+        perp.performUpkeep(performData);
+
+        // trader1 still has position (was healthy, skipped)
+        PerpDEX.Position memory pos1 = perp.getPosition(BTC, trader1);
+        assertGt(pos1.size, 0, "Healthy trader1 should NOT be liquidated");
+
+        // trader2 was liquidated
+        PerpDEX.Position memory pos2 = perp.getPosition(BTC, trader2);
+        assertEq(pos2.size, 0, "Trader2 should be liquidated");
+    }
+
+    function test_performUpkeep_resilient_skipsAlreadyClosed() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+        _commitAndExecute(trader2, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+
+        btcUsdFeed.setAnswer(48_000e8);
+
+        (, bytes memory performData) = perp.checkUpkeep("");
+
+        // Trader1 closes their position before automation fires
+        vm.prank(trader1);
+        perp.closePosition(BTC);
+
+        // performUpkeep should gracefully skip trader1 and liquidate trader2
+        vm.prank(fwd);
+        perp.performUpkeep(performData);
+
+        PerpDEX.Position memory pos2 = perp.getPosition(BTC, trader2);
+        assertEq(pos2.size, 0, "Trader2 should be liquidated");
+    }
+
+    function test_performUpkeep_batchMultipleAssets() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+        _commitAndExecute(trader2, ETH, PerpDEX.Side.Long, 100_000 * ONE_TOKEN, 5);
+
+        // Both crash 20%
+        btcUsdFeed.setAnswer(48_000e8);
+        ethUsdFeed.setAnswer(2_400e8);
+
+        (, bytes memory performData) = perp.checkUpkeep("");
+        vm.prank(fwd);
+        perp.performUpkeep(performData);
+
+        assertEq(perp.getPosition(BTC, trader1).size, 0);
+        assertEq(perp.getPosition(ETH, trader2).size, 0);
+    }
+
+    function test_performUpkeep_whenPaused_reverts() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        vm.prank(owner);
+        perp.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(fwd);
+        perp.performUpkeep(abi.encode(new address[](0), new address[](0)));
+    }
 }

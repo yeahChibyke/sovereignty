@@ -922,4 +922,61 @@ contract PerpDEXForkTest is Test {
         PerpDEX.Position memory pos2 = perp.getPosition(WETH, trader1);
         assertEq(pos2.collateral, col);
     }
+
+    /*//////////////////////////////////////////////////////////////
+      SECTION: CHAINLINK AUTOMATION (PROTOCOL-OWNED LIQUIDATIONS) — FORK
+    //////////////////////////////////////////////////////////////*/
+
+    function test_fork_setForwarder() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+        assertEq(perp.liquidationForwarder(), fwd);
+    }
+
+    function test_fork_traderSet_trackedOnFork() public {
+        uint256 col = 300_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 2);
+        _commitAndExecute(trader2, WBTC, PerpDEX.Side.Short, col, 2);
+
+        assertEq(perp.tradersPerAssetLength(WBTC), 2);
+
+        vm.prank(trader1);
+        perp.closePosition(WBTC);
+        assertEq(perp.tradersPerAssetLength(WBTC), 1);
+    }
+
+    function test_fork_checkUpkeep_noLiquidatable() public {
+        uint256 col = 500_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 2);
+
+        (bool needed,) = perp.checkUpkeep("");
+        assertFalse(needed, "Healthy position should not trigger upkeep");
+    }
+
+    function test_fork_performUpkeep_onlyForwarder() public {
+        address fwd = makeAddr("forwarder");
+        vm.prank(owner);
+        perp.setForwarder(fwd);
+
+        vm.expectRevert(PerpDEX.OnlyForwarder.selector);
+        vm.prank(trader1);
+        perp.performUpkeep(abi.encode(new address[](0), new address[](0)));
+    }
+
+    function test_fork_automation_multiAssetTraderSet() public {
+        uint256 col = 300_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 2);
+        _commitAndExecute(trader1, WETH, PerpDEX.Side.Short, col, 3);
+        _commitAndExecute(trader2, WSOL, PerpDEX.Side.Long, col, 2);
+
+        assertEq(perp.tradersPerAssetLength(WBTC), 1);
+        assertEq(perp.tradersPerAssetLength(WETH), 1);
+        assertEq(perp.tradersPerAssetLength(WSOL), 1);
+
+        vm.prank(trader1);
+        perp.closePosition(WBTC);
+        assertEq(perp.tradersPerAssetLength(WBTC), 0);
+        assertEq(perp.tradersPerAssetLength(WETH), 1, "Other asset unaffected");
+    }
 }
