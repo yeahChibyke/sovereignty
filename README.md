@@ -1,4 +1,4 @@
-# Sovereignty
+# cNGN Perpetual DEX
 
 A high-performance, fully on-chain Perpetual Futures Decentralized Exchange (DEX). The platform allows users to trade crypto assets with up to 5x leverage, using **cNGN (a fiat-pegged stablecoin)** as the base margin and settlement currency.
 
@@ -12,7 +12,7 @@ The architecture is split into two core smart contracts:
 
 ### 1. Traders
 As a trader, you can open **Long** or **Short** positions on markets like BTC/cNGN, ETH/cNGN, and SOL/cNGN.
-* **Margin:** All margin is posted in `cNGN`.
+* **Margin & Risk:** All margin is posted in `cNGN`. You have full control to dynamically **Add Collateral** (to defend against wicks and lower leverage) or **Remove Collateral** (to extract profits early) on live positions.
 * **Leverage:** Up to 5x leverage. Maximize your exposure to price movements safely.
 * **Funding Rates:** Real-time, continuous funding rates based on the Long/Short Open Interest balance.
 * **Fair Pricing:** Prices are protected from local manipulation via Chainlink oracle triangulation.
@@ -37,10 +37,12 @@ To prevent Oracle front-running and MEV, the protocol uses a **Commit-Reveal** s
 2. **Delay**: The system forces a brief delay (1-20 blocks).
 3. **Reveal (`executeTrade`)**: The trader reveals the cleartext parameters. The DEX verifies the hash, pulls the `cNGN` collateral into the Vault, and records the `Position` using the latest unmanipulated Chainlink mark price.
 
-### Phase 2: Active Position & Funding
-1. **Open Interest (OI)**: The system tracks global Long OI vs. Short OI for every asset.
-2. **Funding Rate**: If Long OI > Short OI, Longs pay Shorts (and vice versa). This is calculated continuously on a per-second basis every time an action occurs on the asset. The rate is carefully scaled internally (targeting ~0.09% daily at maximum imbalance) to prevent aggressive decay.
-3. **Virtual Precision Accounting**: Position sizes are seamlessly scaled to a unified 18-decimal precision (`1e18`) internally. All realized PnL and collateral moves are strictly converting back to 6-decimal `cNGN` token units right at the Vault boundary, completely removing precision rounding bugs.
+### Phase 2: Active Position & Collateral Management
+While a position is active, traders can manage their isolated risk in real-time. Because adjusting margin doesn't open new market exposure, these actions bypass the commit-reveal delay and are executed instantly:
+1. **Add Collateral** (`addCollateral`): Traders can deposit more `cNGN` to lower their effective leverage. This pushes their liquidation price further away, acting as a crucial defensive tool during wicks and volatility.
+2. **Remove Collateral** (`removeCollateral`): Traders can extract "paper profits" or initial capital when a trade is deeply in profit. The protocol strictly enforces an **Infinite Leverage Guardrail**—withdrawals that cause the remaining effective leverage to exceed the 5x limit are safely reverted.
+3. **Funding Rate**: As positions stay open, a continuous per-second funding rate is exchanged between Longs and Shorts based on the Open Interest (OI) imbalance. It is carefully scaled (targeting ~0.09% daily at maximum imbalance) to prevent aggressive decay.
+4. **Virtual Precision Accounting**: Position sizes are seamlessly scaled to a unified 18-decimal precision (`1e18`) internally. All realized PnL and collateral moves are strictly converting back to 6-decimal `cNGN` token units right at the Vault boundary, completely removing precision rounding bugs.
 
 ### Phase 3: Closing & Settlement
 1. **Close Position**: A trader can close their position entirely.

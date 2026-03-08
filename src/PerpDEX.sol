@@ -130,6 +130,8 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
         address indexed trader, address indexed asset, address indexed liquidator, uint256 bounty, uint256 price
     );
     event FundingUpdated(address indexed asset, int256 newFundingIndex);
+    event CollateralAdded(address indexed trader, address indexed asset, uint256 amount);
+    event CollateralRemoved(address indexed trader, address indexed asset, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -148,6 +150,8 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
     error OrderExpired();
     error OrderHashMismatch();
     error InvalidSide();
+    error InsufficientEquity();
+    error ExceedsLeverageAfterRemoval();
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -354,6 +358,65 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable {
         }
 
         emit PositionOpened(msg.sender, _asset, _side, size, _collateral, markPrice);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     COLLATERAL MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Add collateral to an existing position, lowering effective leverage.
+    /// @param _asset The market the position is in.
+    /// @param _amount Raw cNGN amount (6 decimals) to add.
+    function addCollateral(address _asset, uint256 _amount) external nonReentrant whenNotPaused {
+        if (_amount == 0) revert ZeroAmount();
+        Position storage pos = positions[_asset][msg.sender];
+        if (pos.size == 0) revert NoOpenPosition();
+
+        _updateFunding(_asset);
+
+        // Pull cNGN from trader directly to the vault
+        cNGN.safeTransferFrom(msg.sender, address(vault), _amount);
+
+        pos.collateral += _amount;
+        totalCollateralHeld += _amount;
+
+        emit CollateralAdded(msg.sender, _asset, _amount);
+    }
+
+    /// @notice Remove collateral from an existing position, raising effective leverage.
+    ///         Reverts if the removal would exceed MAX_LEVERAGE or leave non-positive equity.
+    /// @param _asset The market the position is in.
+    /// @param _amount Raw cNGN amount (6 decimals) to remove.
+    function removeCollateral(address _asset, uint256 _amount) external nonReentrant whenNotPaused {
+        if (_amount == 0) revert ZeroAmount();
+        Position storage pos = positions[_asset][msg.sender];
+        if (pos.size == 0) revert NoOpenPosition();
+
+        _updateFunding(_asset);
+
+        // Compute current unrealized PnL and pending funding
+        uint256 markPrice = _getMarkPrice(_asset);
+        int256 pnl = _calculatePnL(pos, markPrice);
+        int256 funding = _pendingFunding(_asset, pos);
+        int256 netPnL = pnl - funding;
+
+        // Remaining equity after removal (all in PRECISION / 1e18)
+        uint256 remainingCollateralScaled = _toInternalPrecision(pos.collateral - _amount);
+        int256 remainingEquity = int256(remainingCollateralScaled) + netPnL;
+
+        // Safety: equity must remain positive
+        if (remainingEquity <= 0) revert InsufficientEquity();
+
+        // Safety: effective leverage must not exceed MAX_LEVERAGE
+        // size / equity <= MAX_LEVERAGE  →  size <= equity * MAX_LEVERAGE
+        if (pos.size > uint256(remainingEquity) * MAX_LEVERAGE) revert ExceedsLeverageAfterRemoval();
+
+        pos.collateral -= _amount;
+        totalCollateralHeld -= _amount;
+
+        vault.payTrader(msg.sender, _amount);
+
+        emit CollateralRemoved(msg.sender, _asset, _amount);
     }
 
     /*//////////////////////////////////////////////////////////////

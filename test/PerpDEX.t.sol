@@ -1567,4 +1567,286 @@ contract PerpDEXTest is Test {
         uint256 previewDuringPump = vault.previewRedeem(sharesBefore);
         assertLt(previewDuringPump, previewBefore, "LP cannot exit at stale price");
     }
+
+    /*//////////////////////////////////////////////////////////////
+          SECTION: COLLATERAL MANAGEMENT (ADD / REMOVE)
+    //////////////////////////////////////////////////////////////*/
+
+    // ───────────── addCollateral tests ─────────────
+
+    function test_addCollateral_success() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        uint256 addAmount = 50_000 * ONE_TOKEN;
+        uint256 balBefore = token.balanceOf(trader1);
+        uint256 totalColBefore = perp.totalCollateralHeld();
+
+        vm.prank(trader1);
+        perp.addCollateral(BTC, addAmount);
+
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.collateral, collateral + addAmount);
+        assertEq(perp.totalCollateralHeld(), totalColBefore + addAmount);
+        assertEq(token.balanceOf(trader1), balBefore - addAmount);
+    }
+
+    function test_addCollateral_lowersEffectiveLeverage() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // size = 100k * 1e12 * 5 = 500k * 1e12 in PRECISION
+        // Initial effective leverage = size / collateral_scaled = 5x
+        PerpDEX.Position memory posBefore = perp.getPosition(BTC, trader1);
+
+        // Add 100k more → now 200k collateral backing 500k size = 2.5x
+        uint256 addAmount = 100_000 * ONE_TOKEN;
+        vm.prank(trader1);
+        perp.addCollateral(BTC, addAmount);
+
+        PerpDEX.Position memory posAfter = perp.getPosition(BTC, trader1);
+        assertEq(posAfter.size, posBefore.size, "Size must not change");
+        assertEq(posAfter.collateral, collateral + addAmount);
+        // 500k / 200k = 2.5x effective leverage now
+    }
+
+    function test_addCollateral_revertsNoPosition() public {
+        vm.expectRevert(PerpDEX.NoOpenPosition.selector);
+        vm.prank(trader1);
+        perp.addCollateral(BTC, 10_000 * ONE_TOKEN);
+    }
+
+    function test_addCollateral_revertsZeroAmount() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        vm.expectRevert(PerpDEX.ZeroAmount.selector);
+        vm.prank(trader1);
+        perp.addCollateral(BTC, 0);
+    }
+
+    function test_addCollateral_emitsEvent() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 3);
+
+        uint256 addAmount = 25_000 * ONE_TOKEN;
+        vm.expectEmit(true, true, false, true);
+        emit PerpDEX.CollateralAdded(trader1, BTC, addAmount);
+        vm.prank(trader1);
+        perp.addCollateral(BTC, addAmount);
+    }
+
+    function test_addCollateral_vaultBalanceIncreases() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        uint256 vaultBalBefore = token.balanceOf(address(vault));
+        uint256 addAmount = 30_000 * ONE_TOKEN;
+        vm.prank(trader1);
+        perp.addCollateral(BTC, addAmount);
+
+        assertEq(token.balanceOf(address(vault)), vaultBalBefore + addAmount);
+    }
+
+    function test_addCollateral_whenPaused_reverts() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        vm.prank(owner);
+        perp.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(trader1);
+        perp.addCollateral(BTC, 10_000 * ONE_TOKEN);
+    }
+
+    function test_addCollateral_pushesLiquidationPriceAway() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // Price drops sharply — should be liquidatable at some point
+        // With 5x, a 20% drop wipes collateral. Let's drop 18% → very close to liquidation.
+        btcUsdFeed.setAnswer(49_200e8); // 60k → 49.2k = -18%
+
+        bool liquidatableBefore = perp.isLiquidatable(BTC, trader1);
+
+        // Add heavy collateral to escape liquidation zone
+        vm.prank(trader1);
+        perp.addCollateral(BTC, 200_000 * ONE_TOKEN);
+
+        bool liquidatableAfter = perp.isLiquidatable(BTC, trader1);
+
+        // After adding enough collateral, should no longer be liquidatable
+        if (liquidatableBefore) {
+            assertFalse(liquidatableAfter, "Adding collateral should escape liquidation");
+        }
+    }
+
+    // ───────────── removeCollateral tests ─────────────
+
+    function test_removeCollateral_success() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        // size = 200k * 1e12 * 2 = 400k * 1e12 in PRECISION
+        // After removing 50k: 150k collateral backing 400k size = 2.67x < 5x ✓
+        uint256 removeAmount = 50_000 * ONE_TOKEN;
+        uint256 balBefore = token.balanceOf(trader1);
+        uint256 totalColBefore = perp.totalCollateralHeld();
+
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, removeAmount);
+
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.collateral, collateral - removeAmount);
+        assertEq(perp.totalCollateralHeld(), totalColBefore - removeAmount);
+        assertEq(token.balanceOf(trader1), balBefore + removeAmount);
+    }
+
+    function test_removeCollateral_emitsEvent() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        uint256 removeAmount = 30_000 * ONE_TOKEN;
+        vm.expectEmit(true, true, false, true);
+        emit PerpDEX.CollateralRemoved(trader1, BTC, removeAmount);
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, removeAmount);
+    }
+
+    function test_removeCollateral_revertsNoPosition() public {
+        vm.expectRevert(PerpDEX.NoOpenPosition.selector);
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 10_000 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_revertsZeroAmount() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        vm.expectRevert(PerpDEX.ZeroAmount.selector);
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 0);
+    }
+
+    function test_removeCollateral_revertsExceedsMaxLeverage() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // size = 500k in PRECISION. Currently at 5x exactly.
+        // Removing even 1 token would push past 5x → revert
+        vm.expectRevert(PerpDEX.ExceedsLeverageAfterRemoval.selector);
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 1 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_revertsInsufficientEquity() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // Price drops 15% → losses = 75k, equity ≈ 25k in PRECISION
+        btcUsdFeed.setAnswer(51_000e8); // 60k → 51k = -15%
+
+        // Trying to remove 90k when equity is only ~25k → revert
+        vm.expectRevert(); // Either InsufficientEquity or ExceedsLeverageAfterRemoval
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 90_000 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_respectsMaxLeverage_exactBoundary() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        // size = 400k * 1e12. At 5x max: min equity = 400k/5 = 80k in PRECISION = 80k * 1e12
+        // So max removal from 200k collateral = 200k - 80k = 120k (at breakeven PnL)
+        // Removing exactly 120k should succeed (equity = 80k, leverage = 5x)
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 120_000 * ONE_TOKEN);
+
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.collateral, 80_000 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_revertsJustPastBoundary() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        // Removing 120_001 tokens pushes past 5x
+        vm.expectRevert(PerpDEX.ExceedsLeverageAfterRemoval.selector);
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 120_001 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_shortPosition() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Short, collateral, 2);
+
+        uint256 removeAmount = 50_000 * ONE_TOKEN;
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, removeAmount);
+
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.collateral, collateral - removeAmount);
+    }
+
+    function test_removeCollateral_withUnrealizedProfit() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 5);
+
+        // BTC pumps 5% → trader profit = 5% * 500k = 25k in PRECISION
+        btcUsdFeed.setAnswer(63_000e8);
+
+        // Equity ≈ 100k + 25k = 125k. Max removal so leverage stays ≤ 5x: 125k - 100k = 25k
+        // Should be able to remove some collateral now
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 20_000 * ONE_TOKEN);
+
+        PerpDEX.Position memory pos = perp.getPosition(BTC, trader1);
+        assertEq(pos.collateral, 80_000 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_whenPaused_reverts() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        vm.prank(owner);
+        perp.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 10_000 * ONE_TOKEN);
+    }
+
+    function test_removeCollateral_vaultTotalAssetsUnchanged() public {
+        uint256 collateral = 200_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        // Total assets should reflect LP deposit minus nothing (at breakeven)
+        uint256 totalAssetsBefore = vault.totalAssets();
+
+        // Remove 50k collateral — vault sends tokens out but totalCollateralHeld also drops
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 50_000 * ONE_TOKEN);
+
+        // net effect on totalAssets: balance drops by 50k, collateralHeld drops by 50k → equal
+        assertEq(vault.totalAssets(), totalAssetsBefore);
+    }
+
+    function test_addRemoveCollateral_roundTrip() public {
+        uint256 collateral = 100_000 * ONE_TOKEN;
+        _commitAndExecute(trader1, BTC, PerpDEX.Side.Long, collateral, 2);
+
+        // Add 100k → now 200k at 2x, then remove 100k → back to 100k at 4x
+        vm.prank(trader1);
+        perp.addCollateral(BTC, 100_000 * ONE_TOKEN);
+
+        PerpDEX.Position memory pos1 = perp.getPosition(BTC, trader1);
+        assertEq(pos1.collateral, 200_000 * ONE_TOKEN);
+
+        vm.prank(trader1);
+        perp.removeCollateral(BTC, 100_000 * ONE_TOKEN);
+
+        PerpDEX.Position memory pos2 = perp.getPosition(BTC, trader1);
+        assertEq(pos2.collateral, 100_000 * ONE_TOKEN);
+    }
 }

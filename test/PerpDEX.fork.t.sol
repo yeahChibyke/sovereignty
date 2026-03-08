@@ -824,4 +824,102 @@ contract PerpDEXForkTest is Test {
         assertEq(moi.avgLongPrice, markPrice, "Avg long price should match mark price");
         assertEq(moi.avgShortPrice, 0, "No shorts opened");
     }
+
+    /*//////////////////////////////////////////////////////////////
+        SECTION: COLLATERAL MANAGEMENT (ADD / REMOVE) — FORK
+    //////////////////////////////////////////////////////////////*/
+
+    function test_fork_addCollateral_success() public {
+        uint256 col = 500_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 3);
+
+        uint256 addAmount = 200_000 * ONE_CNGN;
+        uint256 totalColBefore = perp.totalCollateralHeld();
+
+        vm.prank(trader1);
+        cNGN.approve(address(perp), addAmount);
+        vm.prank(trader1);
+        perp.addCollateral(WBTC, addAmount);
+
+        PerpDEX.Position memory pos = perp.getPosition(WBTC, trader1);
+        assertEq(pos.collateral, col + addAmount);
+        assertEq(perp.totalCollateralHeld(), totalColBefore + addAmount);
+    }
+
+    function test_fork_addCollateral_totalAssetsReflectsIncrease() public {
+        uint256 col = 500_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 2);
+
+        uint256 totalAssetsBefore = vault.totalAssets();
+
+        uint256 addAmount = 300_000 * ONE_CNGN;
+        vm.prank(trader1);
+        cNGN.approve(address(perp), addAmount);
+        vm.prank(trader1);
+        perp.addCollateral(WBTC, addAmount);
+
+        // Balance up by addAmount, collateralHeld up by addAmount → totalAssets unchanged
+        assertEq(vault.totalAssets(), totalAssetsBefore);
+    }
+
+    function test_fork_removeCollateral_success() public {
+        uint256 col = 500_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 2);
+
+        // size = 1M CNGN notional at 2x. At 5x max: min equity = 1M/5 = 200k
+        // Can safely remove up to ~300k from 500k collateral
+        uint256 removeAmount = 200_000 * ONE_CNGN;
+        uint256 balBefore = cNGN.balanceOf(trader1);
+
+        vm.prank(trader1);
+        perp.removeCollateral(WBTC, removeAmount);
+
+        PerpDEX.Position memory pos = perp.getPosition(WBTC, trader1);
+        assertEq(pos.collateral, col - removeAmount);
+        assertEq(cNGN.balanceOf(trader1), balBefore + removeAmount);
+    }
+
+    function test_fork_removeCollateral_revertsExceedsLeverage() public {
+        uint256 col = 300_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 5);
+
+        // Already at 5x — cannot remove any meaningful amount
+        vm.expectRevert(PerpDEX.ExceedsLeverageAfterRemoval.selector);
+        vm.prank(trader1);
+        perp.removeCollateral(WBTC, 1 * ONE_CNGN);
+    }
+
+    function test_fork_removeCollateral_totalAssetsUnchanged() public {
+        uint256 col = 500_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WBTC, PerpDEX.Side.Long, col, 2);
+
+        uint256 totalAssetsBefore = vault.totalAssets();
+
+        vm.prank(trader1);
+        perp.removeCollateral(WBTC, 100_000 * ONE_CNGN);
+
+        // balance down 100k, collateralHeld down 100k → totalAssets unchanged
+        assertEq(vault.totalAssets(), totalAssetsBefore);
+    }
+
+    function test_fork_addRemoveCollateral_roundTrip() public {
+        uint256 col = 500_000 * ONE_CNGN;
+        _commitAndExecute(trader1, WETH, PerpDEX.Side.Short, col, 2);
+
+        uint256 addAmount = 200_000 * ONE_CNGN;
+        vm.prank(trader1);
+        cNGN.approve(address(perp), addAmount);
+        vm.prank(trader1);
+        perp.addCollateral(WETH, addAmount);
+
+        PerpDEX.Position memory pos1 = perp.getPosition(WETH, trader1);
+        assertEq(pos1.collateral, col + addAmount);
+
+        // Remove the same amount back
+        vm.prank(trader1);
+        perp.removeCollateral(WETH, addAmount);
+
+        PerpDEX.Position memory pos2 = perp.getPosition(WETH, trader1);
+        assertEq(pos2.collateral, col);
+    }
 }
