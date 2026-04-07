@@ -36,9 +36,7 @@ contract cNGNVaultForkTest is Test {
 
     function setUp() public {
         // Fork Base mainnet
-        string memory rpcUrl =
-            vm.envOr("BASE_RPC_URL", string("https://base-mainnet.g.alchemy.com/v2/Ca9M-U7msUU-au5jYSolQfd_eQ3xQlaB"));
-        vm.createSelectFork(rpcUrl);
+        vm.createSelectFork(vm.envString("RPC_URL"));
 
         cNGN = IERC20(CNGN);
 
