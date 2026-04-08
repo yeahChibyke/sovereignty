@@ -5,6 +5,7 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {ERC20, IERC20, IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AccessManaged} from "@openzeppelin/contracts/access/manager/AccessManaged.sol";
 
 /// @notice Minimal interface to query PerpDEX for unrealized PnL and collateral.
 interface IPerpDEX {
@@ -16,7 +17,7 @@ interface IPerpDEX {
 /// @notice ERC4626 vault where LPs deposit cNGN to underwrite trader PnL.
 ///         Share price reflects the Global PnL of all open trader positions,
 ///         meaning LP exposure increases/decreases with trader profits/losses.
-contract cNGNVault is ERC4626 {
+contract cNGNVault is ERC4626, AccessManaged {
     using SafeERC20 for IERC20;
     using Math for uint256;
 
@@ -37,7 +38,6 @@ contract cNGNVault is ERC4626 {
 
     error OnlyPerpDex();
     error ZeroAddress();
-    error PerpDexAlreadySet();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -51,7 +51,12 @@ contract cNGNVault is ERC4626 {
     //////////////////////////////////////////////////////////////*/
 
     /// @param _cNGN Address of the cNGN ERC20 token.
-    constructor(IERC20 _cNGN) ERC4626(_cNGN) ERC20("cNGN Vault Share", "vcNGN") {}
+    /// @param _accessManager Address of the SovereigntyAccessManager proxy.
+    constructor(IERC20 _cNGN, address _accessManager)
+        ERC4626(_cNGN)
+        ERC20("cNGN Vault Share", "vcNGN")
+        AccessManaged(_accessManager)
+    {}
 
     /*//////////////////////////////////////////////////////////////
                            ACCESS CONTROL
@@ -62,10 +67,9 @@ contract cNGNVault is ERC4626 {
         _;
     }
 
-    /// @notice One-time setter for the PerpDEX address (called after deployment).
-    function setPerpDex(address _perpDex) external {
+    /// @notice Set (or update) the PerpDEX address. Restricted via SovereigntyAccessManager.
+    function setPerpDex(address _perpDex) external restricted {
         if (_perpDex == address(0)) revert ZeroAddress();
-        if (perpDex != address(0)) revert PerpDexAlreadySet();
         perpDex = _perpDex;
         emit PerpDexSet(_perpDex);
     }

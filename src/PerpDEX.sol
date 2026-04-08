@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {AccessManaged} from "@openzeppelin/contracts/access/manager/AccessManaged.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "chainlink-evm/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {
@@ -16,7 +16,7 @@ import {cNGNVault} from "./cNGNVault.sol";
 /// @notice Perpetual futures trading engine for BTC/cNGN, ETH/cNGN, SOL/cNGN.
 ///         Uses Chainlink triangulation (Asset/USD ÷ NGN/USD), continuous funding,
 ///         commit-reveal order flow, Chainlink Automation liquidations, and public liquidation with bounties.
-contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable, AutomationCompatibleInterface {
+contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatibleInterface {
     using SafeERC20 for IERC20;
 
     /*//////////////////////////////////////////////////////////////
@@ -175,8 +175,8 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable, AutomationCompatibl
                              CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _cNGN, address _vault, address _ngnUsdFeed, uint256 _ngnUsdMaxHeartbeat, address _owner)
-        Ownable(_owner)
+    constructor(address _cNGN, address _vault, address _ngnUsdFeed, uint256 _ngnUsdMaxHeartbeat, address _accessManager)
+        AccessManaged(_accessManager)
     {
         cNGN = IERC20(_cNGN);
         vault = cNGNVault(_vault);
@@ -189,7 +189,7 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable, AutomationCompatibl
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Configure (or reconfigure) an asset's Chainlink feed.
-    function configureAsset(address _asset, address _priceFeed, uint256 _maxHeartbeat) external onlyOwner {
+    function configureAsset(address _asset, address _priceFeed, uint256 _maxHeartbeat) external restricted {
         bool existed = assetConfigs[_asset].enabled;
         assetConfigs[_asset] =
             AssetConfig({priceFeed: AggregatorV3Interface(_priceFeed), maxHeartbeat: _maxHeartbeat, enabled: true});
@@ -200,23 +200,23 @@ contract PerpDEX is ReentrancyGuard, Ownable2Step, Pausable, AutomationCompatibl
     }
 
     /// @notice Update the NGN/USD feed.
-    function setNgnUsdFeed(address _feed, uint256 _maxHeartbeat) external onlyOwner {
+    function setNgnUsdFeed(address _feed, uint256 _maxHeartbeat) external restricted {
         ngnUsdFeed = AggregatorV3Interface(_feed);
         ngnUsdMaxHeartbeat = _maxHeartbeat;
         emit NgnFeedConfigured(_feed, _maxHeartbeat);
     }
 
-    function pause() external onlyOwner {
+    function pause() external restricted {
         _pause();
     }
 
-    function unpause() external onlyOwner {
+    function unpause() external restricted {
         _unpause();
     }
 
     /// @notice Set the Chainlink Automation forwarder address.
     ///         Called by the admin after registering the upkeep.
-    function setForwarder(address _forwarder) external onlyOwner {
+    function setForwarder(address _forwarder) external restricted {
         liquidationForwarder = _forwarder;
         emit ForwarderSet(_forwarder);
     }

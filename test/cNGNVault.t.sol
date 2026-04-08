@@ -3,7 +3,10 @@ pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IAccessManaged} from "@openzeppelin/contracts/access/manager/IAccessManaged.sol";
 import {cNGNVault} from "../src/cNGNVault.sol";
+import {SovereigntyAccessManager} from "../src/SovereigntyAccessManager.sol";
 import {MockcNGN} from "./mocks/MockcNGN.sol";
 import {MockPerpDEX} from "./mocks/MockPerpDEX.sol";
 
@@ -11,6 +14,7 @@ contract cNGNVaultTest is Test {
     MockcNGN public token;
     cNGNVault public vault;
     MockPerpDEX public perpDexMock;
+    SovereigntyAccessManager public sam;
 
     address owner = makeAddr("owner");
     address lp1 = makeAddr("lp1");
@@ -21,10 +25,24 @@ contract cNGNVaultTest is Test {
     uint256 constant ONE_TOKEN = 1e6; // 6 decimals
 
     function setUp() public {
+        // Deploy SAM proxy
+        SovereigntyAccessManager samImpl = new SovereigntyAccessManager();
+        ERC1967Proxy samProxy =
+            new ERC1967Proxy(address(samImpl), abi.encodeCall(SovereigntyAccessManager.initialize, (owner)));
+        sam = SovereigntyAccessManager(address(samProxy));
+
         token = new MockcNGN();
-        vault = new cNGNVault(IERC20(address(token)));
+        vault = new cNGNVault(IERC20(address(token)), address(sam));
         perpDexMock = new MockPerpDEX();
         perpDex = address(perpDexMock);
+
+        // Configure SAM: map setPerpDex to VAULT_MANAGER_ROLE and grant to owner
+        vm.startPrank(owner);
+        bytes4[] memory selectors = new bytes4[](1);
+        selectors[0] = cNGNVault.setPerpDex.selector;
+        sam.setTargetFunctionRole(address(vault), selectors, sam.VAULT_MANAGER_ROLE());
+        sam.grantRole(sam.VAULT_MANAGER_ROLE(), owner, 0);
+        vm.stopPrank();
 
         // Fund LPs
         token.mint(lp1, 1_000_000 * ONE_TOKEN);
@@ -62,6 +80,7 @@ contract cNGNVaultTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_setPerpDex_success() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
         assertEq(vault.perpDex(), perpDex);
     }
@@ -69,18 +88,20 @@ contract cNGNVaultTest is Test {
     function test_setPerpDex_emitsEvent() public {
         vm.expectEmit(true, false, false, false);
         emit cNGNVault.PerpDexSet(perpDex);
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
     }
 
     function test_setPerpDex_revertsOnZeroAddress() public {
+        vm.prank(owner);
         vm.expectRevert(cNGNVault.ZeroAddress.selector);
         vault.setPerpDex(address(0));
     }
 
-    function test_setPerpDex_revertsWhenAlreadySet() public {
+    function test_setPerpDex_revertsUnauthorized() public {
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, lp1));
+        vm.prank(lp1);
         vault.setPerpDex(perpDex);
-        vm.expectRevert(cNGNVault.PerpDexAlreadySet.selector);
-        vault.setPerpDex(makeAddr("other"));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -154,9 +175,8 @@ contract cNGNVaultTest is Test {
         vm.prank(lp1);
         vault.deposit(amount, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
-
-        // Simulate: traders have 10k unrealized profit
         perpDexMock.setGlobalUnrealizedPnL(int256(10_000 * ONE_TOKEN));
 
         // totalAssets = balance(100k) - collateral(0) - unrealizedPnL(10k) = 90k
@@ -168,6 +188,7 @@ contract cNGNVaultTest is Test {
         vm.prank(lp1);
         vault.deposit(amount, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         // Simulate: traders have 5k unrealized loss
@@ -182,6 +203,7 @@ contract cNGNVaultTest is Test {
         vm.prank(lp1);
         vault.deposit(amount, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         // Simulate: traders have small 1k unrealized profit
@@ -196,6 +218,7 @@ contract cNGNVaultTest is Test {
         vm.prank(lp1);
         vault.deposit(amount, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         // Unrealized profit exceeds vault balance
@@ -209,6 +232,7 @@ contract cNGNVaultTest is Test {
         vm.prank(lp1);
         vault.deposit(amount, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         // Simulate: 50k collateral in vault and 10k unrealized profit
@@ -226,6 +250,7 @@ contract cNGNVaultTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_settlePnL_onlyPerpDex() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         vm.expectRevert(cNGNVault.OnlyPerpDex.selector);
@@ -234,6 +259,7 @@ contract cNGNVaultTest is Test {
     }
 
     function test_settlePnL_accumulates() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         vm.prank(perpDex);
@@ -250,6 +276,7 @@ contract cNGNVaultTest is Test {
     }
 
     function test_settlePnL_emitsEvent() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         vm.expectEmit(false, false, false, true);
@@ -264,6 +291,7 @@ contract cNGNVaultTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_payTrader_onlyPerpDex() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         vm.expectRevert(cNGNVault.OnlyPerpDex.selector);
@@ -276,6 +304,7 @@ contract cNGNVaultTest is Test {
         vm.prank(lp1);
         vault.deposit(amount, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 payout = 1_000 * ONE_TOKEN;
@@ -287,6 +316,7 @@ contract cNGNVaultTest is Test {
     }
 
     function test_receiveFromTrader_onlyPerpDex() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         vm.expectRevert(cNGNVault.OnlyPerpDex.selector);
@@ -299,6 +329,7 @@ contract cNGNVaultTest is Test {
         vm.prank(trader);
         token.approve(address(vault), type(uint256).max);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 amount = 5_000 * ONE_TOKEN;
@@ -314,6 +345,7 @@ contract cNGNVaultTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_sharePrice_decreasesOnTraderProfit() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 amount = 100_000 * ONE_TOKEN;
@@ -331,6 +363,7 @@ contract cNGNVaultTest is Test {
     }
 
     function test_sharePrice_increasesOnTraderLoss() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 amount = 100_000 * ONE_TOKEN;
@@ -345,5 +378,75 @@ contract cNGNVaultTest is Test {
 
         uint256 previewAfter = vault.previewRedeem(sharesBefore);
         assertGt(previewAfter, previewBefore);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                   SAM INTEGRATION: DYNAMIC ROLE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_authority_isSAM() public view {
+        assertEq(vault.authority(), address(sam));
+    }
+
+    function test_setPerpDex_newRoleHolder() public {
+        // Grant VAULT_MANAGER_ROLE to lp1
+        vm.startPrank(owner);
+        sam.grantRole(sam.VAULT_MANAGER_ROLE(), lp1, 0);
+        vm.stopPrank();
+
+        // lp1 can now call setPerpDex
+        vm.prank(lp1);
+        vault.setPerpDex(perpDex);
+        assertEq(vault.perpDex(), perpDex);
+    }
+
+    function test_setPerpDex_revokedRoleHolder() public {
+        // Revoke VAULT_MANAGER_ROLE from owner
+        vm.startPrank(owner);
+        sam.revokeRole(sam.VAULT_MANAGER_ROLE(), owner);
+        vm.stopPrank();
+
+        // Owner can no longer call setPerpDex
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, owner));
+        vm.prank(owner);
+        vault.setPerpDex(perpDex);
+    }
+
+    function test_setPerpDex_roleReassignment() public {
+        // Revoke from owner, grant to lp1
+        vm.startPrank(owner);
+        sam.revokeRole(sam.VAULT_MANAGER_ROLE(), owner);
+        sam.grantRole(sam.VAULT_MANAGER_ROLE(), lp1, 0);
+        vm.stopPrank();
+
+        // Owner blocked
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, owner));
+        vm.prank(owner);
+        vault.setPerpDex(perpDex);
+
+        // lp1 succeeds
+        vm.prank(lp1);
+        vault.setPerpDex(perpDex);
+        assertEq(vault.perpDex(), perpDex);
+    }
+
+    function test_setPerpDex_roleRemapped() public {
+        // Remap setPerpDex from VAULT_MANAGER_ROLE to OPERATOR_ROLE
+        vm.startPrank(owner);
+        bytes4[] memory selectors = new bytes4[](1);
+        selectors[0] = cNGNVault.setPerpDex.selector;
+        sam.setTargetFunctionRole(address(vault), selectors, sam.OPERATOR_ROLE());
+        sam.grantRole(sam.OPERATOR_ROLE(), lp2, 0);
+        vm.stopPrank();
+
+        // Owner (only has VAULT_MANAGER_ROLE) now blocked
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, owner));
+        vm.prank(owner);
+        vault.setPerpDex(perpDex);
+
+        // lp2 (has OPERATOR_ROLE) succeeds
+        vm.prank(lp2);
+        vault.setPerpDex(perpDex);
+        assertEq(vault.perpDex(), perpDex);
     }
 }

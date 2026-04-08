@@ -3,10 +3,12 @@ pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IAccessManaged} from "@openzeppelin/contracts/access/manager/IAccessManaged.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {cNGNVault} from "../src/cNGNVault.sol";
 import {PerpDEX} from "../src/PerpDEX.sol";
+import {SovereigntyAccessManager} from "../src/SovereigntyAccessManager.sol";
 import {MockcNGN} from "./mocks/MockcNGN.sol";
 import {MockAggregator} from "./mocks/MockAggregator.sol";
 import {AggregatorV3Interface} from "chainlink-evm/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
@@ -15,6 +17,7 @@ contract PerpDEXTest is Test {
     MockcNGN public token;
     cNGNVault public vault;
     PerpDEX public perp;
+    SovereigntyAccessManager public sam;
 
     MockAggregator public btcUsdFeed;
     MockAggregator public ethUsdFeed;
@@ -47,8 +50,14 @@ contract PerpDEXTest is Test {
         // Deploy token
         token = new MockcNGN();
 
+        // Deploy SAM proxy
+        SovereigntyAccessManager samImpl = new SovereigntyAccessManager();
+        ERC1967Proxy samProxy =
+            new ERC1967Proxy(address(samImpl), abi.encodeCall(SovereigntyAccessManager.initialize, (owner)));
+        sam = SovereigntyAccessManager(address(samProxy));
+
         // Deploy vault
-        vault = new cNGNVault(IERC20(address(token)));
+        vault = new cNGNVault(IERC20(address(token)), address(sam));
 
         // Deploy price feeds
         btcUsdFeed = new MockAggregator(BTC_USD, 8);
@@ -57,9 +66,36 @@ contract PerpDEXTest is Test {
         ngnUsdFeed = new MockAggregator(NGN_USD, 8);
 
         // Deploy PerpDEX
-        perp = new PerpDEX(address(token), address(vault), address(ngnUsdFeed), HEARTBEAT, owner);
+        perp = new PerpDEX(address(token), address(vault), address(ngnUsdFeed), HEARTBEAT, address(sam));
+
+        // Configure SAM role mappings
+        vm.startPrank(owner);
+
+        // Vault: setPerpDex → VAULT_MANAGER_ROLE
+        bytes4[] memory vaultSelectors = new bytes4[](1);
+        vaultSelectors[0] = cNGNVault.setPerpDex.selector;
+        sam.setTargetFunctionRole(address(vault), vaultSelectors, sam.VAULT_MANAGER_ROLE());
+        sam.grantRole(sam.VAULT_MANAGER_ROLE(), owner, 0);
+
+        // PerpDEX: configureAsset, setNgnUsdFeed, setForwarder → OPERATOR_ROLE
+        bytes4[] memory operatorSelectors = new bytes4[](3);
+        operatorSelectors[0] = PerpDEX.configureAsset.selector;
+        operatorSelectors[1] = PerpDEX.setNgnUsdFeed.selector;
+        operatorSelectors[2] = PerpDEX.setForwarder.selector;
+        sam.setTargetFunctionRole(address(perp), operatorSelectors, sam.OPERATOR_ROLE());
+        sam.grantRole(sam.OPERATOR_ROLE(), owner, 0);
+
+        // PerpDEX: pause, unpause → PAUSER_ROLE
+        bytes4[] memory pauserSelectors = new bytes4[](2);
+        pauserSelectors[0] = PerpDEX.pause.selector;
+        pauserSelectors[1] = PerpDEX.unpause.selector;
+        sam.setTargetFunctionRole(address(perp), pauserSelectors, sam.PAUSER_ROLE());
+        sam.grantRole(sam.PAUSER_ROLE(), owner, 0);
+
+        vm.stopPrank();
 
         // Link vault to PerpDEX
+        vm.prank(owner);
         vault.setPerpDex(address(perp));
 
         // Configure assets
@@ -139,7 +175,7 @@ contract PerpDEXTest is Test {
     }
 
     function test_configureAsset_onlyOwner() public {
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, trader1));
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, trader1));
         vm.prank(trader1);
         perp.configureAsset(makeAddr("new"), address(btcUsdFeed), HEARTBEAT);
     }
@@ -186,20 +222,9 @@ contract PerpDEXTest is Test {
     }
 
     function test_pause_onlyOwner() public {
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, trader1));
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, trader1));
         vm.prank(trader1);
         perp.pause();
-    }
-
-    function test_ownable2Step() public {
-        vm.prank(owner);
-        perp.transferOwnership(trader1);
-        // Not yet transferred
-        assertEq(perp.owner(), owner);
-
-        vm.prank(trader1);
-        perp.acceptOwnership();
-        assertEq(perp.owner(), trader1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1864,7 +1889,7 @@ contract PerpDEXTest is Test {
     }
 
     function test_setForwarder_onlyOwner() public {
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, trader1));
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, trader1));
         vm.prank(trader1);
         perp.setForwarder(makeAddr("fwd"));
     }
@@ -2212,5 +2237,93 @@ contract PerpDEXTest is Test {
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(fwd);
         perp.performUpkeep(abi.encode(new address[](0), new address[](0)));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                   SAM INTEGRATION: DYNAMIC ROLE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_authority_isSAM() public view {
+        assertEq(perp.authority(), address(sam));
+    }
+
+    function test_setNgnUsdFeed_onlyOperator() public {
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, trader1));
+        vm.prank(trader1);
+        perp.setNgnUsdFeed(address(ngnUsdFeed), HEARTBEAT);
+    }
+
+    function test_configureAsset_separateRoleHolder() public {
+        address ops = makeAddr("ops");
+        vm.startPrank(owner);
+        sam.grantRole(sam.OPERATOR_ROLE(), ops, 0);
+        vm.stopPrank();
+
+        MockAggregator newFeed = new MockAggregator(BTC_USD, 8);
+        vm.prank(ops);
+        perp.configureAsset(makeAddr("newAsset"), address(newFeed), HEARTBEAT);
+
+        assertEq(perp.supportedAssetsLength(), 4);
+    }
+
+    function test_pause_separateRoleHolder() public {
+        address pauser = makeAddr("pauser");
+        vm.startPrank(owner);
+        sam.grantRole(sam.PAUSER_ROLE(), pauser, 0);
+        vm.stopPrank();
+
+        vm.prank(pauser);
+        perp.pause();
+        assertTrue(perp.paused());
+
+        vm.prank(pauser);
+        perp.unpause();
+        assertFalse(perp.paused());
+    }
+
+    function test_pause_operatorCannotPause() public {
+        // Operator role should NOT be able to call pause (mapped to PAUSER_ROLE)
+        address ops = makeAddr("ops");
+        vm.startPrank(owner);
+        sam.grantRole(sam.OPERATOR_ROLE(), ops, 0);
+        vm.stopPrank();
+
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, ops));
+        vm.prank(ops);
+        perp.pause();
+    }
+
+    function test_configureAsset_revokedOperator() public {
+        vm.startPrank(owner);
+        sam.revokeRole(sam.OPERATOR_ROLE(), owner);
+        vm.stopPrank();
+
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, owner));
+        vm.prank(owner);
+        perp.configureAsset(makeAddr("x"), address(btcUsdFeed), HEARTBEAT);
+    }
+
+    function test_setForwarder_roleRemapped() public {
+        // Remap setForwarder from OPERATOR_ROLE to PAUSER_ROLE
+        vm.startPrank(owner);
+        bytes4[] memory selectors = new bytes4[](1);
+        selectors[0] = PerpDEX.setForwarder.selector;
+        sam.setTargetFunctionRole(address(perp), selectors, sam.PAUSER_ROLE());
+        vm.stopPrank();
+
+        // Owner has PAUSER_ROLE, so this should work
+        vm.prank(owner);
+        perp.setForwarder(makeAddr("fwd"));
+        assertEq(perp.liquidationForwarder(), makeAddr("fwd"));
+
+        // Someone with only OPERATOR_ROLE is now blocked
+        address ops = makeAddr("ops");
+        vm.startPrank(owner);
+        sam.grantRole(sam.OPERATOR_ROLE(), ops, 0);
+        vm.stopPrank();
+
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, ops));
+        vm.prank(ops);
+        perp.setForwarder(makeAddr("fwd2"));
     }
 }

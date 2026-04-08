@@ -3,11 +3,13 @@ pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IAccessManaged} from "@openzeppelin/contracts/access/manager/IAccessManaged.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "chainlink-evm/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {cNGNVault} from "../src/cNGNVault.sol";
 import {PerpDEX} from "../src/PerpDEX.sol";
+import {SovereigntyAccessManager} from "../src/SovereigntyAccessManager.sol";
 
 /// @title PerpDEX Fork Test
 /// @notice Full integration tests on a Base mainnet fork with real cNGN and Chainlink feeds.
@@ -41,6 +43,7 @@ contract PerpDEXForkTest is Test {
     IERC20 public cNGN;
     cNGNVault public vault;
     PerpDEX public perp;
+    SovereigntyAccessManager public sam;
 
     address owner = makeAddr("owner");
     address trader1 = makeAddr("trader1");
@@ -61,11 +64,44 @@ contract PerpDEXForkTest is Test {
 
         cNGN = IERC20(CNGN);
 
+        // Deploy SAM proxy
+        SovereigntyAccessManager samImpl = new SovereigntyAccessManager();
+        ERC1967Proxy samProxy =
+            new ERC1967Proxy(address(samImpl), abi.encodeCall(SovereigntyAccessManager.initialize, (owner)));
+        sam = SovereigntyAccessManager(address(samProxy));
+
         // Deploy vault & PerpDEX
-        vault = new cNGNVault(cNGN);
-        perp = new PerpDEX(CNGN, address(vault), NGN_USD_FEED, NGN_HEARTBEAT, owner);
+        vault = new cNGNVault(cNGN, address(sam));
+        perp = new PerpDEX(CNGN, address(vault), NGN_USD_FEED, NGN_HEARTBEAT, address(sam));
+
+        // Configure SAM role mappings
+        vm.startPrank(owner);
+
+        // Vault: setPerpDex → VAULT_MANAGER_ROLE
+        bytes4[] memory vaultSelectors = new bytes4[](1);
+        vaultSelectors[0] = cNGNVault.setPerpDex.selector;
+        sam.setTargetFunctionRole(address(vault), vaultSelectors, sam.VAULT_MANAGER_ROLE());
+        sam.grantRole(sam.VAULT_MANAGER_ROLE(), owner, 0);
+
+        // PerpDEX: configureAsset, setNgnUsdFeed, setForwarder → OPERATOR_ROLE
+        bytes4[] memory operatorSelectors = new bytes4[](3);
+        operatorSelectors[0] = PerpDEX.configureAsset.selector;
+        operatorSelectors[1] = PerpDEX.setNgnUsdFeed.selector;
+        operatorSelectors[2] = PerpDEX.setForwarder.selector;
+        sam.setTargetFunctionRole(address(perp), operatorSelectors, sam.OPERATOR_ROLE());
+        sam.grantRole(sam.OPERATOR_ROLE(), owner, 0);
+
+        // PerpDEX: pause, unpause → PAUSER_ROLE
+        bytes4[] memory pauserSelectors = new bytes4[](2);
+        pauserSelectors[0] = PerpDEX.pause.selector;
+        pauserSelectors[1] = PerpDEX.unpause.selector;
+        sam.setTargetFunctionRole(address(perp), pauserSelectors, sam.PAUSER_ROLE());
+        sam.grantRole(sam.PAUSER_ROLE(), owner, 0);
+
+        vm.stopPrank();
 
         // Link vault → PerpDEX
+        vm.prank(owner);
         vault.setPerpDex(address(perp));
 
         // Configure all three markets using real Chainlink feeds
@@ -198,16 +234,6 @@ contract PerpDEXForkTest is Test {
         assertEq(perp.supportedAssets(0), WBTC);
         assertEq(perp.supportedAssets(1), WETH);
         assertEq(perp.supportedAssets(2), WSOL);
-    }
-
-    function test_fork_ownable2Step() public {
-        vm.prank(owner);
-        perp.transferOwnership(trader1);
-        assertEq(perp.owner(), owner); // still owner until accepted
-
-        vm.prank(trader1);
-        perp.acceptOwnership();
-        assertEq(perp.owner(), trader1);
     }
 
     function test_fork_pause_blocksTrading() public {

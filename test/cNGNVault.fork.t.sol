@@ -3,7 +3,10 @@ pragma solidity ^0.8.24;
 
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {IAccessManaged} from "@openzeppelin/contracts/access/manager/IAccessManaged.sol";
 import {cNGNVault} from "../src/cNGNVault.sol";
+import {SovereigntyAccessManager} from "../src/SovereigntyAccessManager.sol";
 import {MockPerpDEX} from "./mocks/MockPerpDEX.sol";
 
 /// @title cNGNVault Fork Test
@@ -22,7 +25,9 @@ contract cNGNVaultForkTest is Test {
     IERC20 public cNGN;
     cNGNVault public vault;
     MockPerpDEX public perpDexMock;
+    SovereigntyAccessManager public sam;
 
+    address owner = makeAddr("owner");
     address lp1 = makeAddr("lp1");
     address lp2 = makeAddr("lp2");
     address perpDex;
@@ -40,10 +45,24 @@ contract cNGNVaultForkTest is Test {
 
         cNGN = IERC20(CNGN);
 
+        // Deploy SAM proxy
+        SovereigntyAccessManager samImpl = new SovereigntyAccessManager();
+        ERC1967Proxy samProxy =
+            new ERC1967Proxy(address(samImpl), abi.encodeCall(SovereigntyAccessManager.initialize, (owner)));
+        sam = SovereigntyAccessManager(address(samProxy));
+
         // Deploy the vault against the real cNGN token
-        vault = new cNGNVault(cNGN);
+        vault = new cNGNVault(cNGN, address(sam));
         perpDexMock = new MockPerpDEX();
         perpDex = address(perpDexMock);
+
+        // Configure SAM: map setPerpDex to VAULT_MANAGER_ROLE and grant to owner
+        vm.startPrank(owner);
+        bytes4[] memory selectors = new bytes4[](1);
+        selectors[0] = cNGNVault.setPerpDex.selector;
+        sam.setTargetFunctionRole(address(vault), selectors, sam.VAULT_MANAGER_ROLE());
+        sam.grantRole(sam.VAULT_MANAGER_ROLE(), owner, 0);
+        vm.stopPrank();
 
         // Deal cNGN to LPs using foundry cheatcodes
         deal(CNGN, lp1, 5_000_000 * ONE_CNGN);
@@ -155,14 +174,15 @@ contract cNGNVaultForkTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_fork_setPerpDex() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
         assertEq(vault.perpDex(), perpDex);
     }
 
-    function test_fork_setPerpDex_revertsDouble() public {
+    function test_fork_setPerpDex_revertsUnauthorized() public {
+        vm.expectRevert(abi.encodeWithSelector(IAccessManaged.AccessManagedUnauthorized.selector, lp1));
+        vm.prank(lp1);
         vault.setPerpDex(perpDex);
-        vm.expectRevert(cNGNVault.PerpDexAlreadySet.selector);
-        vault.setPerpDex(makeAddr("other"));
     }
 
     function test_fork_settlePnL_traderLoss() public {
@@ -170,6 +190,7 @@ contract cNGNVaultForkTest is Test {
         vm.prank(lp1);
         vault.deposit(deposit, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         // Simulate: traders have 100k unrealized loss
@@ -184,6 +205,7 @@ contract cNGNVaultForkTest is Test {
         vm.prank(lp1);
         vault.deposit(deposit, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         // Simulate: traders have 50k unrealized profit
@@ -197,6 +219,7 @@ contract cNGNVaultForkTest is Test {
         vm.prank(lp1);
         vault.deposit(deposit, lp1);
 
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 payout = 100_000 * ONE_CNGN;
@@ -207,6 +230,7 @@ contract cNGNVaultForkTest is Test {
     }
 
     function test_fork_payTrader_onlyPerpDex() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         vm.expectRevert(cNGNVault.OnlyPerpDex.selector);
@@ -219,6 +243,7 @@ contract cNGNVaultForkTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_fork_sharePrice_decreasesOnTraderProfit() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 deposit = 2_000_000 * ONE_CNGN;
@@ -236,6 +261,7 @@ contract cNGNVaultForkTest is Test {
     }
 
     function test_fork_sharePrice_increasesOnTraderLoss() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 deposit = 2_000_000 * ONE_CNGN;
@@ -253,6 +279,7 @@ contract cNGNVaultForkTest is Test {
     }
 
     function test_fork_lp2_depositsAfterPnL_getsFewerShares() public {
+        vm.prank(owner);
         vault.setPerpDex(perpDex);
 
         uint256 deposit = 2_000_000 * ONE_CNGN;
