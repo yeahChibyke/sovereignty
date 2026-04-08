@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="48" fill="#0A0A0A"/>
+  
+  <!-- Concept 5: Stacked Sovereignty -->
+  <!-- A bold angular geometric S sitting atop two horizontal parallel bars. -->
+  <!-- The bars reference the ₦ Naira symbol crossbars and also represent -->
+  <!-- protocol foundation layers (AccessManager → Vault → DEX). -->
+  <g transform="translate(256, 240)">
+    <!-- The Angular S (main mark) -->
+    <!-- Top bar of S -->
+    <path d="M-70,-140 L70,-140 L70,-100 L-70,-100 Z" fill="#00C853"/>
+    <!-- Left vertical (upper) -->
+    <path d="M-70,-100 L-28,-100 L-28,-25 L-70,-25 Z" fill="#00C853"/>
+    <!-- Middle bar of S -->
+    <path d="M-70,-25 L70,-25 L70,15 L-70,15 Z" fill="#00C853"/>
+    <!-- Right vertical (lower) -->
+    <path d="M28,15 L70,15 L70,90 L28,90 Z" fill="#00C853"/>
+    <!-- Bottom bar of S -->
+    <path d="M-70,90 L70,90 L70,130 L-70,130 Z" fill="#00C853"/>
+    
+    <!-- Foundation bars (Naira crossbars / protocol layers) -->
+    <!-- Bar 1 -->
+    <rect x="-85" y="155" width="170" height="10" rx="2" fill="#00C853" opacity="0.6"/>
+    <!-- Bar 2 -->
+    <rect x="-85" y="178" width="170" height="10" rx="2" fill="#00C853" opacity="0.35"/>
+  </g>
+</svg>

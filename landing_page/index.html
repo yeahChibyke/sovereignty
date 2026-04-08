@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Sovereignty — cNGN-Margined Perpetual DEX</title>
+  <meta name="description" content="Trade perpetual futures margined in cNGN. Non-custodial. On-chain. Sovereign."/>
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png"/>
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png"/>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            sov: {
+              green: '#00e87b',
+              dark: '#00c853',
+              bg: '#f7f8fa',
+              card: '#ffffff',
+              muted: '#6b7280',
+              border: '#e5e7eb',
+            }
+          },
+          fontFamily: {
+            display: ['Inter', 'system-ui', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .gradient-text {
+      background: linear-gradient(135deg, #00e87b 0%, #00b4d8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero-gradient {
+      background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(0,232,123,0.07) 0%, transparent 70%),
+                  radial-gradient(ellipse 60% 50% at 80% 20%, rgba(0,180,216,0.05) 0%, transparent 60%),
+                  #f7f8fa;
+    }
+    .glass-card {
+      background: rgba(255,255,255,0.7);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+    }
+    .glow-border { box-shadow: 0 0 0 1px rgba(0,232,123,0.15), 0 4px 24px rgba(0,232,123,0.06); }
+    .card-hover { transition: transform 0.2s ease, box-shadow 0.2s ease; }
+    .card-hover:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.06); }
+    .nav-blur { background: rgba(247,248,250,0.85); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+    @keyframes float { 0%,100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-20px) rotate(1deg); } }
+    .float-anim { animation: float 3.5s ease-in-out infinite; }
+    .hero-chart-img { position: absolute; inset: 0; width: 100%; transition: opacity 0.8s ease; }
+    .hero-chart-img.active { opacity: 1; }
+    .hero-chart-img.hidden { opacity: 0; }
+    .tab-active { color: #00e87b; border-color: #00e87b; }
+    .tab-inactive { color: #6b7280; border-color: transparent; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    .mobile-menu { transform: translateX(100%); transition: transform 0.3s ease; }
+    .mobile-menu.open { transform: translateX(0); }
+    .mobile-overlay { opacity: 0; pointer-events: none; transition: opacity 0.3s ease; }
+    .mobile-overlay.open { opacity: 1; pointer-events: auto; }
+  </style>
+</head>
+<body id="top" class="bg-sov-bg text-gray-900 antialiased">
+
+  <!-- ===== NAVIGATION ===== -->
+  <nav class="fixed top-0 left-0 right-0 z-50 nav-blur border-b border-sov-border/50">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="#top" class="flex items-center gap-2.5">
+        <svg viewBox="0 0 512 512" class="w-8 h-8" fill="none">
+          <g transform="translate(256,256)">
+            <path d="M-90,-160 L90,-160 L110,-55 L110,55 L90,160 L-90,160 L-110,55 L-110,-55Z" fill="#00e87b"/>
+            <path d="M-65,-125 L65,-125 L65,-85 L-65,-85Z" fill="#f7f8fa"/>
+            <path d="M-65,-85 L-25,-85 L-25,-20 L-65,-20Z" fill="#f7f8fa"/>
+            <path d="M-65,-20 L65,-20 L65,20 L-65,20Z" fill="#f7f8fa"/>
+            <path d="M25,20 L65,20 L65,85 L25,85Z" fill="#f7f8fa"/>
+            <path d="M-65,85 L65,85 L65,125 L-65,125Z" fill="#f7f8fa"/>
+          </g>
+        </svg>
+        <span class="text-lg font-bold tracking-tight">Sovereignty</span>
+      </a>
+      <div class="hidden md:flex items-center gap-8 text-sm font-medium text-sov-muted">
+        <a href="#features" class="hover:text-gray-900 transition-colors">Features</a>
+        <a href="#how-it-works" class="hover:text-gray-900 transition-colors">How It Works</a>
+        <a href="#architecture" class="hover:text-gray-900 transition-colors">Architecture</a>
+        <a href="#security" class="hover:text-gray-900 transition-colors">Security</a>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener" class="text-sov-muted hover:text-gray-900 transition-colors hidden md:block">
+          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        </a>
+        <a href="#waitlist" class="bg-sov-green text-gray-900 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-sov-dark transition-colors hidden md:inline-flex">
+          Get Early Access
+        </a>
+        <button onclick="toggleMobileMenu()" class="md:hidden w-9 h-9 flex items-center justify-center rounded-lg hover:bg-gray-100 transition-colors" aria-label="Menu">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Mobile Menu -->
+  <div id="mobile-overlay" class="mobile-overlay fixed inset-0 bg-black/30 z-50" onclick="toggleMobileMenu()"></div>
+  <div id="mobile-menu" class="mobile-menu fixed top-0 right-0 bottom-0 w-72 bg-white z-50 shadow-2xl p-6">
+    <div class="flex justify-between items-center mb-8">
+      <span class="font-bold text-lg">Menu</span>
+      <button onclick="toggleMobileMenu()" class="w-9 h-9 flex items-center justify-center rounded-lg hover:bg-gray-100">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="flex flex-col gap-4 text-sm font-medium text-sov-muted mb-8">
+      <a href="#features" onclick="toggleMobileMenu()" class="py-2 hover:text-gray-900 transition-colors">Features</a>
+      <a href="#how-it-works" onclick="toggleMobileMenu()" class="py-2 hover:text-gray-900 transition-colors">How It Works</a>
+      <a href="#architecture" onclick="toggleMobileMenu()" class="py-2 hover:text-gray-900 transition-colors">Architecture</a>
+      <a href="#security" onclick="toggleMobileMenu()" class="py-2 hover:text-gray-900 transition-colors">Security</a>
+      <a href="#faq" onclick="toggleMobileMenu()" class="py-2 hover:text-gray-900 transition-colors">FAQ</a>
+      <a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener" class="py-2 hover:text-gray-900 transition-colors">GitHub</a>
+    </div>
+    <a href="#waitlist" onclick="toggleMobileMenu()" class="bg-sov-green text-gray-900 px-4 py-3 rounded-xl text-sm font-bold hover:bg-sov-dark transition-colors text-center block">
+      Get Early Access
+    </a>
+  </div>
+    </div>
+  </nav>
+
+  <!-- ===== HERO ===== -->
+  <section class="hero-gradient pt-32 pb-20 md:pt-40 md:pb-28 overflow-hidden">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="grid lg:grid-cols-2 gap-12 items-center">
+        <div>
+          <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sov-green/10 border border-sov-green/20 text-sm font-medium text-sov-dark mb-6">
+            <span class="w-1.5 h-1.5 rounded-full bg-sov-green animate-pulse"></span>
+            Built on Base Network
+          </div>
+          <h1 class="text-5xl md:text-6xl lg:text-7xl font-black tracking-tight leading-[1.05] mb-6">
+            Trade Perps.<br/>
+            <span class="gradient-text">Margined in cNGN.</span>
+          </h1>
+          <p class="text-lg md:text-xl text-sov-muted max-w-lg mb-8 leading-relaxed">
+            The first perpetual futures exchange denominated entirely in the Nigerian Naira stablecoin. Non-custodial. On-chain. Sovereign.
+          </p>
+          <div class="flex flex-wrap gap-4 mb-8">
+            <a href="#waitlist" class="bg-sov-green text-gray-900 px-6 py-3 rounded-xl text-sm font-semibold hover:bg-sov-dark transition-colors inline-flex items-center gap-2">
+              Get Early Access
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+            </a>
+            <a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener" class="bg-white text-gray-900 px-6 py-3 rounded-xl text-sm font-semibold border border-sov-border hover:border-gray-300 transition-colors inline-flex items-center gap-2">
+              Read Docs
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+            </a>
+          </div>
+          <!-- Waitlist inline form -->
+          <div id="waitlist" class="bg-white rounded-2xl border border-sov-border p-4 max-w-md mb-12">
+            <form onsubmit="handleWaitlist(event)" class="flex gap-2">
+              <input type="email" required placeholder="Enter your email" class="flex-1 px-4 py-2.5 rounded-xl border border-sov-border text-sm focus:outline-none focus:ring-2 focus:ring-sov-green/30 focus:border-sov-green transition-colors" id="hero-email"/>
+              <button type="submit" class="bg-sov-green text-gray-900 px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-sov-dark transition-colors whitespace-nowrap">Join Waitlist</button>
+            </form>
+            <p class="text-xs text-sov-muted mt-2 ml-1">Be first to trade when we launch. No spam.</p>
+          </div>
+          <!-- Stats row -->
+          <div class="flex gap-8 md:gap-12">
+            <div>
+              <div class="text-2xl md:text-3xl font-bold">5x</div>
+              <div class="text-sm text-sov-muted">Max Leverage</div>
+            </div>
+            <div class="w-px bg-sov-border"></div>
+            <div>
+              <div class="text-2xl md:text-3xl font-bold">100%</div>
+              <div class="text-sm text-sov-muted">On-Chain</div>
+            </div>
+            <div class="w-px bg-sov-border"></div>
+            <div>
+              <div class="text-2xl md:text-3xl font-bold">0</div>
+              <div class="text-sm text-sov-muted">Custody Risk</div>
+            </div>
+          </div>
+        </div>
+        <div class="relative hidden lg:block">
+          <div class="float-anim">
+            <div class="relative w-full max-w-lg mx-auto drop-shadow-xl">
+              <img src="assets/chart-mockup.svg" alt="BTC/cNGN chart" class="hero-chart-img active" id="hero-btc"/>
+              <img src="assets/chart-eth.svg" alt="ETH/cNGN chart" class="hero-chart-img hidden" id="hero-eth"/>
+              <img src="assets/chart-sol.svg" alt="SOL/cNGN chart" class="hero-chart-img hidden" id="hero-sol"/>
+            </div>
+          </div>
+          <!-- Floating badge -->
+          <div class="absolute -bottom-4 left-8 glass-card rounded-2xl px-5 py-3 glow-border flex items-center gap-3" id="hero-badge">
+            <div class="w-10 h-10 rounded-full flex items-center justify-center" id="hero-badge-icon" style="background: rgba(0,232,123,0.1);">
+              <svg class="w-5 h-5" id="hero-badge-svg" style="color: #00e87b;" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+            </div>
+            <div>
+              <div class="text-xs text-sov-muted" id="hero-badge-pair">BTC/cNGN</div>
+              <div class="text-sm font-bold" id="hero-badge-change" style="color: #00e87b;">+6.42%</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== POWERED BY BAR ===== -->
+  <section class="border-y border-sov-border bg-white py-6">
+    <div class="max-w-7xl mx-auto px-6 flex flex-wrap items-center justify-center gap-8 md:gap-16 text-sov-muted">
+      <span class="text-xs font-medium uppercase tracking-widest">Powered By</span>
+      <div class="flex items-center gap-2 opacity-40 hover:opacity-70 transition-opacity">
+        <svg class="w-6 h-6" viewBox="0 0 111 111" fill="currentColor"><path d="M54.921 110.034C85.359 110.034 110.034 85.402 110.034 55.017C110.034 24.6319 85.359 0 54.921 0C26.0432 0 2.35281 22.1714 0 50.3923H72.8467V59.6416H0C2.35281 87.8625 26.0432 110.034 54.921 110.034Z"/></svg>
+        <span class="font-semibold text-sm">Base</span>
+      </div>
+      <div class="flex items-center gap-2 opacity-40 hover:opacity-70 transition-opacity">
+        <svg class="w-5 h-5" viewBox="0 0 37 42" fill="currentColor"><path d="M18.5 0L0 10.5V31.5L18.5 42L37 31.5V10.5L18.5 0ZM28.58 27.27L18.5 33.07L8.42 27.27V15.73L18.5 9.93L28.58 15.73V27.27Z"/></svg>
+        <span class="font-semibold text-sm">Chainlink</span>
+      </div>
+      <div class="flex items-center gap-2 opacity-40 hover:opacity-70 transition-opacity">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 2.18l7 3.12v4.7c0 4.83-3.13 9.37-7 10.82-3.87-1.45-7-5.99-7-10.82V6.3l7-3.12z"/></svg>
+        <span class="font-semibold text-sm">OpenZeppelin</span>
+      </div>
+      <div class="flex items-center gap-2 opacity-40 hover:opacity-70 transition-opacity">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><text x="4" y="18" font-size="16" font-weight="700" font-family="Inter,sans-serif">₦</text></svg>
+        <span class="font-semibold text-sm">cNGN</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FEATURES TABS ===== -->
+  <section id="features" class="py-20 md:py-28">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="text-center mb-12">
+        <h2 class="text-3xl md:text-5xl font-black tracking-tight mb-4">Everything you need to trade</h2>
+        <p class="text-sov-muted text-lg max-w-2xl mx-auto">A complete on-chain perpetual futures ecosystem, built for the Nigerian market.</p>
+      </div>
+
+      <!-- Tab buttons -->
+      <div class="flex justify-center gap-1 mb-12">
+        <button onclick="switchTab('trade')" id="tab-trade" class="px-6 py-2.5 text-sm font-semibold rounded-lg border-b-2 tab-active transition-colors">Trade</button>
+        <button onclick="switchTab('earn')" id="tab-earn" class="px-6 py-2.5 text-sm font-semibold rounded-lg border-b-2 tab-inactive transition-colors">Earn</button>
+        <button onclick="switchTab('secure')" id="tab-secure" class="px-6 py-2.5 text-sm font-semibold rounded-lg border-b-2 tab-inactive transition-colors">Secure</button>
+      </div>
+
+      <!-- Trade tab -->
+      <div id="content-trade" class="tab-content active">
+        <div class="grid md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 bg-white rounded-2xl border border-sov-border p-8 card-hover">
+            <div class="flex items-start justify-between mb-6">
+              <div>
+                <h3 class="text-xl font-bold mb-2">Perpetual Futures</h3>
+                <p class="text-sov-muted">Trade BTC, ETH, and SOL perpetuals with up to 5x leverage. All positions settled entirely in cNGN.</p>
+              </div>
+              <div class="w-10 h-10 rounded-xl bg-sov-green/10 flex items-center justify-center shrink-0 ml-4">
+                <svg class="w-5 h-5 text-sov-green" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+              </div>
+            </div>
+            <!-- Pair selector tabs -->
+            <div class="flex gap-2 mb-4">
+              <button onclick="switchPair('btc')" id="pair-btc" class="px-4 py-1.5 text-xs font-bold rounded-full bg-sov-green/10 text-sov-green border border-sov-green/20 transition-colors">BTC/cNGN</button>
+              <button onclick="switchPair('eth')" id="pair-eth" class="px-4 py-1.5 text-xs font-bold rounded-full bg-gray-100 text-sov-muted border border-transparent hover:bg-gray-200 transition-colors">ETH/cNGN</button>
+              <button onclick="switchPair('sol')" id="pair-sol" class="px-4 py-1.5 text-xs font-bold rounded-full bg-gray-100 text-sov-muted border border-transparent hover:bg-gray-200 transition-colors">SOL/cNGN</button>
+            </div>
+            <div class="relative rounded-xl border border-sov-border/50 overflow-hidden">
+              <img id="chart-btc" src="assets/chart-mockup.svg" alt="BTC/cNGN chart" class="w-full transition-opacity duration-500"/>
+              <img id="chart-eth" src="assets/chart-eth.svg" alt="ETH/cNGN chart" class="w-full absolute inset-0 opacity-0 transition-opacity duration-500"/>
+              <img id="chart-sol" src="assets/chart-sol.svg" alt="SOL/cNGN chart" class="w-full absolute inset-0 opacity-0 transition-opacity duration-500"/>
+            </div>
+          </div>
+          <div class="flex flex-col gap-6">
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-purple-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-purple-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Commit-Reveal</h3>
+              <p class="text-sm text-sov-muted">Front-running resistant order execution with a two-phase commit-reveal mechanism.</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">cNGN Margined</h3>
+              <p class="text-sm text-sov-muted">No USD exposure. Deposit, margin, and settle all in Naira stablecoin.</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Chainlink Oracles</h3>
+              <p class="text-sm text-sov-muted">Tamper-proof price feeds from Chainlink's decentralized oracle network.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Earn tab -->
+      <div id="content-earn" class="tab-content">
+        <div class="grid md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 bg-white rounded-2xl border border-sov-border p-8 card-hover">
+            <div class="flex items-start justify-between mb-6">
+              <div>
+                <h3 class="text-xl font-bold mb-2">cNGN Vault</h3>
+                <p class="text-sov-muted">Deposit cNGN into the vault to earn yield from trading fees. Your deposits provide counter-party liquidity to traders.</p>
+              </div>
+              <div class="w-10 h-10 rounded-xl bg-sov-green/10 flex items-center justify-center shrink-0 ml-4">
+                <svg class="w-5 h-5 text-sov-green" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+              </div>
+            </div>
+            <img src="assets/vault-mockup.svg" alt="Vault interface" class="w-full rounded-xl border border-sov-border/50"/>
+          </div>
+          <div class="flex flex-col gap-6">
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-emerald-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">7-Day Lock Period</h3>
+              <p class="text-sm text-sov-muted">Deposits lock for 7 days to ensure liquidity stability. Withdraw anytime after.</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-teal-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-teal-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Fee-Based Yield</h3>
+              <p class="text-sm text-sov-muted">Earn a share of all trading fees proportional to your vault deposit share.</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-cyan-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-cyan-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Auto-Compounding</h3>
+              <p class="text-sm text-sov-muted">Vault shares automatically appreciate as fees accrue. No manual claiming needed.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Secure tab -->
+      <div id="content-secure" class="tab-content">
+        <div class="grid md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 bg-white rounded-2xl border border-sov-border p-8 card-hover">
+            <div class="flex items-start justify-between mb-6">
+              <div>
+                <h3 class="text-xl font-bold mb-2">Security First</h3>
+                <p class="text-sov-muted">Built with OpenZeppelin contracts, role-based access control, and battle-tested patterns. Every trade is trustless and verifiable.</p>
+              </div>
+              <div class="w-10 h-10 rounded-xl bg-sov-green/10 flex items-center justify-center shrink-0 ml-4">
+                <svg class="w-5 h-5 text-sov-green" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              </div>
+            </div>
+            <img src="assets/security-mockup.svg" alt="Security features" class="w-full rounded-xl border border-sov-border/50"/>
+          </div>
+          <div class="flex flex-col gap-6">
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Non-Custodial</h3>
+              <p class="text-sm text-sov-muted">Your funds stay in smart contracts you can verify. No intermediary ever holds your assets.</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Open Source</h3>
+              <p class="text-sm text-sov-muted">Every line of code is public and auditable. Verify the contracts yourself on GitHub.</p>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-6 card-hover flex-1">
+              <div class="w-10 h-10 rounded-xl bg-violet-50 flex items-center justify-center mb-4">
+                <svg class="w-5 h-5 text-violet-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"/></svg>
+              </div>
+              <h3 class="font-bold mb-1">Role-Based Access</h3>
+              <p class="text-sm text-sov-muted">Granular access control via SovereigntyAccessManager. Admin-only operations well isolated.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== STATEMENT BANNER ===== -->
+  <section class="bg-gray-900 py-16 md:py-24">
+    <div class="max-w-4xl mx-auto px-6 text-center">
+      <h2 class="text-3xl md:text-5xl lg:text-6xl font-black text-white tracking-tight leading-tight mb-4">
+        Your assets.<br/>
+        <span class="gradient-text">100% yours.</span>
+      </h2>
+      <p class="text-gray-400 text-lg max-w-xl mx-auto mb-8">
+        Global financial freedom, masked by local simplicity, powered by the blockchain.
+      </p>
+      <a href="#waitlist" class="bg-sov-green text-gray-900 px-8 py-3.5 rounded-xl text-sm font-bold hover:bg-sov-dark transition-colors inline-flex items-center gap-2">
+        Get Early Access
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+      </a>
+    </div>
+  </section>
+
+  <!-- ===== HOW IT WORKS ===== -->
+  <section id="how-it-works" class="py-20 md:py-28 bg-white">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl md:text-5xl font-black tracking-tight mb-4">How it works</h2>
+        <p class="text-sov-muted text-lg max-w-xl mx-auto">Four simple steps to start trading perpetuals in cNGN.</p>
+      </div>
+      <div class="grid md:grid-cols-4 gap-8 relative">
+        <div class="text-center relative">
+          <div class="w-10 h-10 rounded-full bg-sov-green text-gray-900 font-bold text-sm flex items-center justify-center mx-auto mb-5">1</div>
+          <div class="hidden md:block absolute top-5 left-[60%] w-[80%] h-px bg-gradient-to-r from-sov-green/40 to-sov-border"></div>
+          <h3 class="font-bold mb-2">Connect Wallet</h3>
+          <p class="text-sm text-sov-muted">Connect your Web3 wallet to the Sovereignty dApp on Base network.</p>
+        </div>
+        <div class="text-center relative">
+          <div class="w-10 h-10 rounded-full bg-sov-green text-gray-900 font-bold text-sm flex items-center justify-center mx-auto mb-5">2</div>
+          <div class="hidden md:block absolute top-5 left-[60%] w-[80%] h-px bg-gradient-to-r from-sov-green/40 to-sov-border"></div>
+          <h3 class="font-bold mb-2">Deposit cNGN</h3>
+          <p class="text-sm text-sov-muted">Fund your margin account with cNGN stablecoin. Your funds stay in the smart contract.</p>
+        </div>
+        <div class="text-center relative">
+          <div class="w-10 h-10 rounded-full bg-sov-green text-gray-900 font-bold text-sm flex items-center justify-center mx-auto mb-5">3</div>
+          <div class="hidden md:block absolute top-5 left-[60%] w-[80%] h-px bg-gradient-to-r from-sov-green/40 to-sov-border"></div>
+          <h3 class="font-bold mb-2">Open Position</h3>
+          <p class="text-sm text-sov-muted">Go long or short with up to 5x leverage. Orders use commit-reveal for MEV protection.</p>
+        </div>
+        <div class="text-center">
+          <div class="w-10 h-10 rounded-full bg-sov-green text-gray-900 font-bold text-sm flex items-center justify-center mx-auto mb-5">4</div>
+          <h3 class="font-bold mb-2">Earn & Withdraw</h3>
+          <p class="text-sm text-sov-muted">Close positions anytime. PnL settled in cNGN. Withdraw your funds with no delays.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== ARCHITECTURE ===== -->
+  <section id="architecture" class="py-20 md:py-28">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="grid lg:grid-cols-2 gap-16 items-center">
+        <div>
+          <h2 class="text-3xl md:text-5xl font-black tracking-tight mb-6">Three contracts.<br/>One protocol.</h2>
+          <p class="text-sov-muted text-lg mb-10 leading-relaxed">
+            Sovereignty is architecturally minimal. Three smart contracts handle access control, liquidity, and trading — all verifiable on-chain.
+          </p>
+          <div class="space-y-4">
+            <div class="bg-white rounded-2xl border border-sov-border p-5 card-hover flex gap-4 items-start">
+              <div class="w-12 h-12 rounded-xl bg-sov-green/10 flex items-center justify-center shrink-0">
+                <svg class="w-6 h-6 text-sov-green" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>
+              </div>
+              <div>
+                <h3 class="font-bold text-sm">Access Manager</h3>
+                <p class="text-sm text-sov-muted mt-1">Controls who can do what. Only authorized roles can perform admin operations.</p>
+              </div>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-5 card-hover flex gap-4 items-start">
+              <div class="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
+                <svg class="w-6 h-6 text-blue-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+              </div>
+              <div>
+                <h3 class="font-bold text-sm">cNGN Vault</h3>
+                <p class="text-sm text-sov-muted mt-1">Your liquidity pool. Deposit cNGN, earn yield from trading fees, withdraw anytime after 7 days.</p>
+              </div>
+            </div>
+            <div class="bg-white rounded-2xl border border-sov-border p-5 card-hover flex gap-4 items-start">
+              <div class="w-12 h-12 rounded-xl bg-purple-50 flex items-center justify-center shrink-0">
+                <svg class="w-6 h-6 text-purple-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+              </div>
+              <div>
+                <h3 class="font-bold text-sm">Trading Engine</h3>
+                <p class="text-sm text-sov-muted mt-1">Where trades happen. Open positions, manage leverage, and settle PnL — all on-chain.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Architecture diagram -->
+        <div class="bg-white rounded-3xl border border-sov-border p-8 md:p-12">
+          <div class="space-y-6">
+            <div class="bg-sov-bg rounded-2xl p-5 border border-sov-border">
+              <div class="text-xs font-semibold text-sov-muted uppercase tracking-wider mb-3">Application Layer</div>
+              <div class="grid grid-cols-2 gap-3">
+                <div class="bg-white rounded-xl p-3 border border-sov-border text-center">
+                  <div class="text-xs font-semibold">Trading UI</div>
+                </div>
+                <div class="bg-white rounded-xl p-3 border border-sov-border text-center">
+                  <div class="text-xs font-semibold">Vault Dashboard</div>
+                </div>
+              </div>
+            </div>
+            <div class="flex justify-center">
+              <svg class="w-5 h-5 text-sov-border" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+            </div>
+            <div class="bg-sov-bg rounded-2xl p-5 border border-sov-border">
+              <div class="text-xs font-semibold text-sov-muted uppercase tracking-wider mb-3">Protocol Layer</div>
+              <div class="grid grid-cols-3 gap-3">
+                <div class="bg-sov-green/10 rounded-xl p-3 border border-sov-green/20 text-center">
+                  <div class="text-xs font-semibold text-sov-dark">PerpDEX</div>
+                </div>
+                <div class="bg-sov-green/10 rounded-xl p-3 border border-sov-green/20 text-center">
+                  <div class="text-xs font-semibold text-sov-dark">cNGNVault</div>
+                </div>
+                <div class="bg-sov-green/10 rounded-xl p-3 border border-sov-green/20 text-center">
+                  <div class="text-xs font-semibold text-sov-dark">AccessMgr</div>
+                </div>
+              </div>
+            </div>
+            <div class="flex justify-center">
+              <svg class="w-5 h-5 text-sov-border" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+            </div>
+            <div class="bg-sov-bg rounded-2xl p-5 border border-sov-border">
+              <div class="text-xs font-semibold text-sov-muted uppercase tracking-wider mb-3">Infrastructure Layer</div>
+              <div class="grid grid-cols-3 gap-3">
+                <div class="bg-white rounded-xl p-3 border border-sov-border text-center">
+                  <div class="text-xs font-semibold">Base L2</div>
+                </div>
+                <div class="bg-white rounded-xl p-3 border border-sov-border text-center">
+                  <div class="text-xs font-semibold">Chainlink</div>
+                </div>
+                <div class="bg-white rounded-xl p-3 border border-sov-border text-center">
+                  <div class="text-xs font-semibold">cNGN</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECURITY ===== -->
+  <section id="security" class="py-20 md:py-28 bg-white">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl md:text-5xl font-black tracking-tight mb-4">Built for trust</h2>
+        <p class="text-sov-muted text-lg max-w-xl mx-auto">Every design decision prioritizes user safety and protocol integrity.</p>
+      </div>
+      <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div class="bg-sov-bg rounded-2xl p-6 border border-sov-border card-hover text-center">
+          <div class="w-14 h-14 rounded-2xl bg-white border border-sov-border flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-sov-green" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <h3 class="font-bold mb-2">OpenZeppelin</h3>
+          <p class="text-sm text-sov-muted">Built on battle-tested, audited contract libraries.</p>
+        </div>
+        <div class="bg-sov-bg rounded-2xl p-6 border border-sov-border card-hover text-center">
+          <div class="w-14 h-14 rounded-2xl bg-white border border-sov-border flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-sov-green" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <h3 class="font-bold mb-2">MEV Protected</h3>
+          <p class="text-sm text-sov-muted">Commit-reveal mechanism prevents front-running of trades.</p>
+        </div>
+        <div class="bg-sov-bg rounded-2xl p-6 border border-sov-border card-hover text-center">
+          <div class="w-14 h-14 rounded-2xl bg-white border border-sov-border flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-sov-green" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+          </div>
+          <h3 class="font-bold mb-2">Open Source</h3>
+          <p class="text-sm text-sov-muted">100% transparent. Verify every line of contract code on GitHub.</p>
+        </div>
+        <div class="bg-sov-bg rounded-2xl p-6 border border-sov-border card-hover text-center">
+          <div class="w-14 h-14 rounded-2xl bg-white border border-sov-border flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-sov-green" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <h3 class="font-bold mb-2">Decentralized</h3>
+          <p class="text-sm text-sov-muted">No central server. Runs entirely on Base L2 with Chainlink oracles.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FAQ ===== -->
+  <section id="faq" class="py-20 md:py-28">
+    <div class="max-w-3xl mx-auto px-6">
+      <div class="text-center mb-16">
+        <h2 class="text-3xl md:text-5xl font-black tracking-tight mb-4">Frequently asked questions</h2>
+        <p class="text-sov-muted text-lg">Everything you need to know before you start.</p>
+      </div>
+      <div class="space-y-4">
+        <details class="bg-white rounded-2xl border border-sov-border group" open>
+          <summary class="flex items-center justify-between p-6 cursor-pointer font-semibold text-sm hover:text-sov-dark transition-colors list-none">
+            What is cNGN?
+            <svg class="w-5 h-5 text-sov-muted shrink-0 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <div class="px-6 pb-6 text-sm text-sov-muted leading-relaxed">
+            cNGN is a regulated Nigerian Naira stablecoin — 1 cNGN is always equal to 1 NGN. It's issued by a licensed entity and can be purchased from exchanges or via bank transfer. Sovereignty uses cNGN as the sole collateral and settlement currency.
+          </div>
+        </details>
+        <details class="bg-white rounded-2xl border border-sov-border group">
+          <summary class="flex items-center justify-between p-6 cursor-pointer font-semibold text-sm hover:text-sov-dark transition-colors list-none">
+            How do I get cNGN?
+            <svg class="w-5 h-5 text-sov-muted shrink-0 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <div class="px-6 pb-6 text-sm text-sov-muted leading-relaxed">
+            You can purchase cNGN from supported exchanges or mint it directly via the cNGN platform using a bank transfer. We'll provide step-by-step guides when the app launches.
+          </div>
+        </details>
+        <details class="bg-white rounded-2xl border border-sov-border group">
+          <summary class="flex items-center justify-between p-6 cursor-pointer font-semibold text-sm hover:text-sov-dark transition-colors list-none">
+            What pairs can I trade?
+            <svg class="w-5 h-5 text-sov-muted shrink-0 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <div class="px-6 pb-6 text-sm text-sov-muted leading-relaxed">
+            At launch, Sovereignty will support BTC/cNGN and ETH/cNGN perpetual futures. More pairs will be added based on community demand and oracle availability.
+          </div>
+        </details>
+        <details class="bg-white rounded-2xl border border-sov-border group">
+          <summary class="flex items-center justify-between p-6 cursor-pointer font-semibold text-sm hover:text-sov-dark transition-colors list-none">
+            What happens if my position gets liquidated?
+            <svg class="w-5 h-5 text-sov-muted shrink-0 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <div class="px-6 pb-6 text-sm text-sov-muted leading-relaxed">
+            If your margin ratio falls below the maintenance threshold, your position is automatically closed by the protocol. Any remaining collateral is returned to you. Liquidation bounties go to vault depositors — not to MEV bots.
+          </div>
+        </details>
+        <details class="bg-white rounded-2xl border border-sov-border group">
+          <summary class="flex items-center justify-between p-6 cursor-pointer font-semibold text-sm hover:text-sov-dark transition-colors list-none">
+            Is Sovereignty custodial? Who holds my funds?
+            <svg class="w-5 h-5 text-sov-muted shrink-0 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <div class="px-6 pb-6 text-sm text-sov-muted leading-relaxed">
+            No. Sovereignty is 100% non-custodial. Your funds are held in open-source smart contracts on Base — not by any company or individual. You maintain full control of your assets at all times.
+          </div>
+        </details>
+        <details class="bg-white rounded-2xl border border-sov-border group">
+          <summary class="flex items-center justify-between p-6 cursor-pointer font-semibold text-sm hover:text-sov-dark transition-colors list-none">
+            What is commit-reveal and why does it matter?
+            <svg class="w-5 h-5 text-sov-muted shrink-0 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <div class="px-6 pb-6 text-sm text-sov-muted leading-relaxed">
+            Commit-reveal is a two-step process that prevents front-running. First, you submit an encrypted order (commit). Then, you reveal it. This means no one — including validators — can see your trade before it's locked in, protecting you from MEV extraction.
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== CTA ===== -->
+  <section class="py-20 md:py-28">
+    <div class="max-w-4xl mx-auto px-6">
+      <div class="bg-gray-900 rounded-3xl p-10 md:p-16 text-center relative overflow-hidden">
+        <div class="absolute inset-0 opacity-20">
+          <div class="absolute top-0 left-1/3 w-64 h-64 bg-sov-green rounded-full blur-[100px]"></div>
+          <div class="absolute bottom-0 right-1/4 w-48 h-48 bg-blue-500 rounded-full blur-[80px]"></div>
+        </div>
+        <div class="relative z-10">
+          <h2 class="text-3xl md:text-5xl font-black text-white tracking-tight mb-4">Ready to trade sovereign?</h2>
+          <p class="text-gray-400 text-lg mb-8 max-w-lg mx-auto">Join the first cNGN-margined perpetual DEX. Be the first to know when we launch.</p>
+          <form onsubmit="handleWaitlist(event)" class="flex flex-col sm:flex-row gap-3 max-w-md mx-auto mb-6">
+            <input type="email" required placeholder="Enter your email" class="flex-1 px-4 py-3 rounded-xl text-sm bg-white/10 border border-white/10 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-sov-green/40 focus:border-sov-green/40 transition-colors" id="cta-email"/>
+            <button type="submit" class="bg-sov-green text-gray-900 px-6 py-3 rounded-xl text-sm font-bold hover:bg-sov-dark transition-colors whitespace-nowrap">
+              Join Waitlist
+            </button>
+          </form>
+          <div class="flex flex-wrap justify-center gap-4">
+            <a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener" class="text-gray-400 text-sm hover:text-white transition-colors inline-flex items-center gap-1.5">
+              <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+              View on GitHub
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="border-t border-sov-border py-12 bg-white">
+    <div class="max-w-7xl mx-auto px-6">
+      <div class="grid md:grid-cols-4 gap-10 mb-10">
+        <div>
+          <div class="flex items-center gap-2.5 mb-4">
+            <svg viewBox="0 0 512 512" class="w-7 h-7" fill="none">
+              <g transform="translate(256,256)">
+                <path d="M-90,-160 L90,-160 L110,-55 L110,55 L90,160 L-90,160 L-110,55 L-110,-55Z" fill="#00e87b"/>
+                <path d="M-65,-125 L65,-125 L65,-85 L-65,-85Z" fill="#f7f8fa"/>
+                <path d="M-65,-85 L-25,-85 L-25,-20 L-65,-20Z" fill="#f7f8fa"/>
+                <path d="M-65,-20 L65,-20 L65,20 L-65,20Z" fill="#f7f8fa"/>
+                <path d="M25,20 L65,20 L65,85 L25,85Z" fill="#f7f8fa"/>
+                <path d="M-65,85 L65,85 L65,125 L-65,125Z" fill="#f7f8fa"/>
+              </g>
+            </svg>
+            <span class="text-base font-bold">Sovereignty</span>
+          </div>
+          <p class="text-sm text-sov-muted leading-relaxed">
+            Global financial freedom, masked by local simplicity, powered by the blockchain.
+          </p>
+        </div>
+        <div>
+          <h4 class="font-semibold text-sm mb-4">Protocol</h4>
+          <ul class="space-y-2.5 text-sm text-sov-muted">
+            <li><a href="#features" class="hover:text-gray-900 transition-colors">Trade</a></li>
+            <li><a href="#features" class="hover:text-gray-900 transition-colors">Vault</a></li>
+            <li><a href="#how-it-works" class="hover:text-gray-900 transition-colors">How It Works</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 class="font-semibold text-sm mb-4">Developers</h4>
+          <ul class="space-y-2.5 text-sm text-sov-muted">
+            <li><a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener" class="hover:text-gray-900 transition-colors">GitHub</a></li>
+            <li><a href="#architecture" class="hover:text-gray-900 transition-colors">Smart Contracts</a></li>
+            <li><a href="#architecture" class="hover:text-gray-900 transition-colors">Architecture</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 class="font-semibold text-sm mb-4">Community</h4>
+          <ul class="space-y-2.5 text-sm text-sov-muted">
+            <li><a href="#" class="hover:text-gray-900 transition-colors">Twitter / X</a></li>
+            <li><a href="#" class="hover:text-gray-900 transition-colors">Discord</a></li>
+            <li><a href="#" class="hover:text-gray-900 transition-colors">Telegram</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="pt-8 border-t border-sov-border flex flex-col md:flex-row justify-between items-center gap-4 text-sm text-sov-muted">
+        <span>&copy; 2026 Sovereignty Protocol. All rights reserved.</span>
+        <div class="flex items-center gap-6">
+          <a href="#" class="hover:text-gray-900 transition-colors">Terms</a>
+          <a href="#" class="hover:text-gray-900 transition-colors">Privacy</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    function toggleMobileMenu() {
+      document.getElementById('mobile-menu').classList.toggle('open');
+      document.getElementById('mobile-overlay').classList.toggle('open');
+    }
+
+    function handleWaitlist(e) {
+      e.preventDefault();
+      var form = e.target;
+      var emailInput = form.querySelector('input[type="email"]');
+      var email = emailInput.value.trim();
+      if (!email) return;
+      var btn = form.querySelector('button[type="submit"]');
+      btn.textContent = 'Joined!';
+      btn.disabled = true;
+      emailInput.disabled = true;
+      emailInput.value = '';
+      emailInput.placeholder = 'You\'re on the list!';
+      setTimeout(function() {
+        btn.textContent = 'Join Waitlist';
+        btn.disabled = false;
+        emailInput.disabled = false;
+        emailInput.placeholder = 'Enter your email';
+      }, 3000);
+    }
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.remove('active'); });
+      document.querySelectorAll('[id^="tab-"]').forEach(function(el) {
+        el.classList.remove('tab-active');
+        el.classList.add('tab-inactive');
+      });
+      document.getElementById('content-' + tab).classList.add('active');
+      var btn = document.getElementById('tab-' + tab);
+      btn.classList.remove('tab-inactive');
+      btn.classList.add('tab-active');
+    }
+
+    function switchPair(pair) {
+      var pairs = ['btc', 'eth', 'sol'];
+      var colors = { btc: '#00e87b', eth: '#627eea', sol: '#9945ff' };
+      pairs.forEach(function(p) {
+        var chart = document.getElementById('chart-' + p);
+        var btn = document.getElementById('pair-' + p);
+        if (p === pair) {
+          chart.style.opacity = '1';
+          chart.style.position = 'relative';
+          btn.className = 'px-4 py-1.5 text-xs font-bold rounded-full transition-colors border';
+          btn.style.backgroundColor = colors[p] + '1a';
+          btn.style.color = colors[p];
+          btn.style.borderColor = colors[p] + '33';
+        } else {
+          chart.style.opacity = '0';
+          chart.style.position = 'absolute';
+          btn.className = 'px-4 py-1.5 text-xs font-bold rounded-full bg-gray-100 text-sov-muted border border-transparent hover:bg-gray-200 transition-colors';
+          btn.style.backgroundColor = '';
+          btn.style.color = '';
+          btn.style.borderColor = '';
+        }
+      });
+    }
+
+    // Intersection Observer for scroll animations
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        if (entry.isIntersecting) {
+          entry.target.style.opacity = '1';
+          entry.target.style.transform = 'translateY(0)';
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('section > div').forEach(function(el) {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(20px)';
+      el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+      observer.observe(el);
+    });
+
+    // Auto-cycle hero charts
+    (function() {
+      var pairs = [
+        { id: 'btc', pair: 'BTC/cNGN', change: '+6.42%', color: '#00e87b' },
+        { id: 'eth', pair: 'ETH/cNGN', change: '+4.18%', color: '#627eea' },
+        { id: 'sol', pair: 'SOL/cNGN', change: '+11.27%', color: '#9945ff' }
+      ];
+      var current = 0;
+      setInterval(function() {
+        var prev = pairs[current];
+        current = (current + 1) % pairs.length;
+        var next = pairs[current];
+        // Crossfade charts
+        var prevEl = document.getElementById('hero-' + prev.id);
+        var nextEl = document.getElementById('hero-' + next.id);
+        if (prevEl) { prevEl.classList.remove('active'); prevEl.classList.add('hidden'); }
+        if (nextEl) { nextEl.classList.remove('hidden'); nextEl.classList.add('active'); }
+        // Update badge
+        var badgePair = document.getElementById('hero-badge-pair');
+        var badgeChange = document.getElementById('hero-badge-change');
+        var badgeIcon = document.getElementById('hero-badge-icon');
+        var badgeSvg = document.getElementById('hero-badge-svg');
+        if (badgePair) badgePair.textContent = next.pair;
+        if (badgeChange) { badgeChange.textContent = next.change; badgeChange.style.color = next.color; }
+        if (badgeIcon) badgeIcon.style.background = next.color + '1a';
+        if (badgeSvg) badgeSvg.style.color = next.color;
+      }, 4000);
+    })();
+  </script>
+</body>
+</html>

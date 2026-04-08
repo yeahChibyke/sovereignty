@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="48" fill="#0A0A0A"/>
+  
+  <!-- Concept 3: The Sovereign Crown -->
+  <!-- Three ascending angular peaks - a geometric crown that also reads as -->
+  <!-- ascending candlestick chart candles. Center peak is tallest. -->
+  <!-- Clean triangular/trapezoidal shapes, no curves. -->
+  <g transform="translate(256, 280)">
+    <!-- Left peak (shortest) -->
+    <polygon points="-115,-60 -75,-140 -35,-60" fill="#00C853"/>
+    
+    <!-- Center peak (tallest - sovereignty) -->
+    <polygon points="-45,-60 0,-195 45,-60" fill="#00C853"/>
+    
+    <!-- Right peak (medium) -->
+    <polygon points="35,-60 75,-165 115,-60" fill="#00C853"/>
+    
+    <!-- Base bar connecting all three peaks -->
+    <rect x="-125" y="-60" width="250" height="35" fill="#00C853"/>
+    
+    <!-- Thin accent line below base -->
+    <rect x="-100" y="-12" width="200" height="4" fill="#00C853" opacity="0.35"/>
+  </g>
+</svg>

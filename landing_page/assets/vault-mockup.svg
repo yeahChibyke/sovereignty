@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 400" fill="none">
+  <defs>
+    <linearGradient id="vg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00e87b" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#00e87b" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="500" height="400" rx="24" fill="#fff" fill-opacity="0.6"/>
+  <rect x="1" y="1" width="498" height="398" rx="23" fill="none" stroke="#000" stroke-opacity="0.06"/>
+  <!-- Vault illustration -->
+  <!-- Outer vault door -->
+  <circle cx="250" cy="180" r="120" fill="none" stroke="#e5e7eb" stroke-width="3"/>
+  <circle cx="250" cy="180" r="100" fill="none" stroke="#d1d5db" stroke-width="2"/>
+  <circle cx="250" cy="180" r="80" fill="url(#vg)" stroke="#00e87b" stroke-width="2" stroke-opacity="0.4"/>
+  <!-- Lock mechanism -->
+  <circle cx="250" cy="180" r="30" fill="#00e87b" fill-opacity="0.1" stroke="#00e87b" stroke-width="2"/>
+  <path d="M240,170 L250,160 L260,170 L260,190 L240,190Z" fill="#00e87b" fill-opacity="0.3"/>
+  <circle cx="250" cy="178" r="8" fill="#00e87b"/>
+  <rect x="247" y="178" width="6" height="12" rx="1" fill="#00e87b"/>
+  <!-- Radial lines -->
+  <g stroke="#e5e7eb" stroke-width="1">
+    <line x1="250" y1="60" x2="250" y2="80"/>
+    <line x1="250" y1="280" x2="250" y2="300"/>
+    <line x1="130" y1="180" x2="150" y2="180"/>
+    <line x1="350" y1="180" x2="370" y2="180"/>
+    <line x1="165" y1="95" x2="180" y2="110"/>
+    <line x1="320" y1="250" x2="335" y2="265"/>
+    <line x1="335" y1="95" x2="320" y2="110"/>
+    <line x1="180" y1="250" x2="165" y2="265"/>
+  </g>
+  <!-- Bottom stats -->
+  <g font-family="Inter,sans-serif">
+    <text x="100" y="340" fill="#6b7280" font-size="11" text-anchor="middle">TVL</text>
+    <text x="100" y="360" fill="#111" font-size="16" font-weight="700" text-anchor="middle">₦0</text>
+    <text x="250" y="340" fill="#6b7280" font-size="11" text-anchor="middle">APY</text>
+    <text x="250" y="360" fill="#00e87b" font-size="16" font-weight="700" text-anchor="middle">--.--%</text>
+    <text x="400" y="340" fill="#6b7280" font-size="11" text-anchor="middle">Depositors</text>
+    <text x="400" y="360" fill="#111" font-size="16" font-weight="700" text-anchor="middle">0</text>
+  </g>
+</svg>

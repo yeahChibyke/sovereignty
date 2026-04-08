@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="48" fill="#0A0A0A"/>
+  
+  <!-- Concept 4: The Keystone -->
+  <!-- A faceted hexagonal/diamond keystone shape with an S-channel cut through it. -->
+  <!-- The keystone is architecture's critical piece - the protocol holds the bridge together. -->
+  <g transform="translate(256, 256)">
+    <!-- Outer keystone shape (tapered hexagon - wider at top, narrower at bottom) -->
+    <path d="
+      M-90,-160 L90,-160 
+      L110,-55 L110,55 
+      L90,160 L-90,160 
+      L-110,55 L-110,-55 Z
+    " fill="#00C853"/>
+    
+    <!-- S-channel carved through the keystone (dark cutout) -->
+    <!-- Top horizontal channel -->
+    <path d="M-65,-125 L65,-125 L65,-85 L-65,-85 Z" fill="#0A0A0A"/>
+    <!-- Left vertical channel (connecting top to mid) -->
+    <path d="M-65,-85 L-25,-85 L-25,-20 L-65,-20 Z" fill="#0A0A0A"/>
+    <!-- Middle horizontal channel -->
+    <path d="M-65,-20 L65,-20 L65,20 L-65,20 Z" fill="#0A0A0A"/>
+    <!-- Right vertical channel (connecting mid to bottom) -->
+    <path d="M25,20 L65,20 L65,85 L25,85 Z" fill="#0A0A0A"/>
+    <!-- Bottom horizontal channel -->
+    <path d="M-65,85 L65,85 L65,125 L-65,125 Z" fill="#0A0A0A"/>
+  </g>
+</svg>

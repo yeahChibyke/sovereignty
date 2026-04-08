@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="48" fill="#0A0A0A"/>
+  
+  <!-- Concept 1: The Sovereign Shield-S -->
+  <!-- A bold angular S (all sharp 90° corners) within a faint angular shield -->
+  <g transform="translate(256, 258)">
+    <!-- Faint angular shield silhouette -->
+    <path d="M0,-200 L120,-160 L130,-10 L80,105 L0,180 L-80,105 L-130,-10 L-120,-160 Z" 
+          fill="none" stroke="#00C853" stroke-width="2" opacity="0.15"/>
+    
+    <!-- Bold angular S - single unified path with sharp corners -->
+    <path d="
+      M-75,-135 L75,-135 
+      L75,-90 L-30,-90 
+      L-30,-90 L-75,-90 
+      L-75,-135 Z
+    " fill="#00C853"/>
+    <path d="M-75,-90 L-30,-90 L-30,-22 L-75,-22 Z" fill="#00C853"/>
+    <path d="M-75,-22 L75,-22 L75,22 L-75,22 Z" fill="#00C853"/>
+    <path d="M30,22 L75,22 L75,90 L30,90 Z" fill="#00C853"/>
+    <path d="M-75,90 L75,90 L75,135 L-75,135 Z" fill="#00C853"/>
+  </g>
+</svg>
