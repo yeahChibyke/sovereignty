@@ -13,7 +13,7 @@ import {
 import {cNGNVault} from "./cNGNVault.sol";
 
 /// @title PerpDEX
-/// @notice Perpetual futures trading engine for BTC/cNGN, ETH/cNGN, SOL/cNGN.
+/// @notice Perpetual futures trading engine for Asset/cNGN markets.
 ///         Uses Chainlink triangulation (Asset/USD ÷ NGN/USD), continuous funding,
 ///         commit-reveal order flow, Chainlink Automation liquidations, and public liquidation with bounties.
 contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatibleInterface {
@@ -44,7 +44,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @notice Maximum blocks a committed order stays valid.
     uint256 public constant MAX_BLOCK_DELAY = 20;
 
-    /// @notice Funding rate scaling factor per second (~0.0001% per second at max imbalance).
+    /// @notice Funding rate scaling factor per second (~0.000001% per second at max imbalance).
     /// Targets ~0.09% per day at full imbalance, comparable to DeFi perpetual standards.
     uint256 public constant FUNDING_RATE_PER_SECOND = 1e10;
 
@@ -66,8 +66,8 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
 
     struct Position {
         uint256 size; // Position size in cNGN value (PRECISION scaled)
-        uint256 collateral; // Collateral in cNGN (raw token units, asset decimals)
-        uint256 averagePrice; // Average entry price (PRECISION scaled, in cNGN)
+        uint256 collateral; // Collateral in cNGN (raw token units, 6 decimals)
+        uint256 averagePrice; // Entry price (PRECISION scaled, in cNGN)
         int256 entryFundingIndex; // Funding index snapshot at entry
         Side side;
     }
@@ -584,7 +584,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
                           PNL CALCULATIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Calculate unrealised PnL for a position (PRECISION scaled, in cNGN terms).
+    /// @notice Calculate unrealized PnL for a position (PRECISION scaled, in cNGN terms).
     function _calculatePnL(Position storage pos, uint256 _markPrice) internal view returns (int256) {
         // priceDelta = markPrice - averagePrice (both in PRECISION)
         int256 priceDelta = int256(_markPrice) - int256(pos.averagePrice);

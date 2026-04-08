@@ -15,7 +15,8 @@ interface IPerpDEX {
 
 /// @title cNGNVault
 /// @notice ERC4626 vault where LPs deposit cNGN to underwrite trader PnL.
-///         Share price reflects the Global PnL of all open trader positions,
+///         Share price reflects both realized PnL (settled via token transfers)
+///         and unrealized PnL (queried from PerpDEX via live oracle prices),
 ///         meaning LP exposure increases/decreases with trader profits/losses.
 contract cNGNVault is ERC4626, AccessManaged {
     using SafeERC20 for IERC20;
@@ -86,12 +87,12 @@ contract cNGNVault is ERC4626, AccessManaged {
         emit PnLSettled(_pnl, globalTraderPnL);
     }
 
-    /// @notice Transfer cNGN out to a trader (profit payout).
+    /// @notice Transfer cNGN to a specified address (profit payouts, collateral withdrawals, or liquidator bounties).
     function payTrader(address _to, uint256 _amount) external onlyPerpDex {
         IERC20(asset()).safeTransfer(_to, _amount);
     }
 
-    /// @notice Pull cNGN from the PerpDEX (losses flowing into vault).
+    /// @notice Pull cNGN from a specified address into the vault.
     function receiveFromTrader(address _from, uint256 _amount) external onlyPerpDex {
         IERC20(asset()).safeTransferFrom(_from, address(this), _amount);
     }
@@ -117,7 +118,7 @@ contract cNGNVault is ERC4626, AccessManaged {
             return lpAssets > 0 ? uint256(lpAssets) : 0;
         }
 
-        // Fallback: PerpDEX not yet linked, use realized PnL tracking
+        // Fallback: PerpDEX not yet linked or not a deployed contract, use realized PnL tracking
         if (globalTraderPnL >= 0) {
             uint256 absTraderPnL = uint256(globalTraderPnL);
             return balance > absTraderPnL ? balance - absTraderPnL : 0;

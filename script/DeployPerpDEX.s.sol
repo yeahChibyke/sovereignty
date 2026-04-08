@@ -14,13 +14,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 ///           CNGN_TOKEN      — cNGN ERC20 address
 ///           NGN_USD_FEED    — Chainlink NGN/USD aggregator
 ///           NGN_HEARTBEAT   — Max staleness for NGN/USD feed (seconds)
-///           BTC_ADDRESS     — Synthetic asset identifier for BTC market
+///           BTC_ADDRESS     — Asset address identifier for BTC market
 ///           BTC_USD_FEED    — Chainlink BTC/USD aggregator
 ///           BTC_HEARTBEAT   — Max staleness for BTC/USD
-///           ETH_ADDRESS     — Synthetic asset identifier for ETH market
+///           ETH_ADDRESS     — Asset address identifier for ETH market
 ///           ETH_USD_FEED    — Chainlink ETH/USD aggregator
 ///           ETH_HEARTBEAT   — Max staleness for ETH/USD
-///           SOL_ADDRESS     — Synthetic asset identifier for SOL market
+///           SOL_ADDRESS     — Asset address identifier for SOL market
 ///           SOL_USD_FEED    — Chainlink SOL/USD aggregator
 ///           SOL_HEARTBEAT   — Max staleness for SOL/USD
 contract DeployPerpDEX is Script {
@@ -42,7 +42,7 @@ contract DeployPerpDEX is Script {
         PerpDEX perp = new PerpDEX(cNgnToken, address(vault), ngnUsdFeed, ngnHeartbeat, samProxy);
         console.log("PerpDEX deployed at:", address(perp));
 
-        // 3. Configure SAM: map vault functions to VAULT_MANAGER_ROLE
+        // 3. Configure SAM: map vault function to VAULT_MANAGER_ROLE
         bytes4[] memory vaultSelectors = new bytes4[](1);
         vaultSelectors[0] = cNGNVault.setPerpDex.selector;
         sam.setTargetFunctionRole(address(vault), vaultSelectors, sam.VAULT_MANAGER_ROLE());

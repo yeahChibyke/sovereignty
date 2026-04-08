@@ -10,7 +10,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 /// @notice Centralized, upgradeable role-based access manager for the Sovereignty protocol.
 ///
 ///         Defines protocol-wide role constants that consuming contracts reference.
-///         Consuming contracts inherit AccessManagedUpgradeable and use the `restricted`
+///         Consuming contracts inherit AccessManaged and use the `restricted`
 ///         modifier; role-to-function mappings are configured here via `setTargetFunctionRole`.
 ///
 ///         Upgradeable via UUPS so roles can be added, removed, or reassigned without
