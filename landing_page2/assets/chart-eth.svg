@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400" fill="none">
+  <defs>
+    <linearGradient id="ethGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#627eea" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#627eea" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="ethGlow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="600" height="400" rx="24" fill="#fff" fill-opacity="0.6"/>
+  <rect x="1" y="1" width="598" height="398" rx="23" fill="none" stroke="#000" stroke-opacity="0.06"/>
+  <!-- Grid -->
+  <g stroke="#000" stroke-opacity="0.04" stroke-width="1">
+    <line x1="60" y1="60" x2="560" y2="60"/>
+    <line x1="60" y1="120" x2="560" y2="120"/>
+    <line x1="60" y1="180" x2="560" y2="180"/>
+    <line x1="60" y1="240" x2="560" y2="240"/>
+    <line x1="60" y1="300" x2="560" y2="300"/>
+  </g>
+  <!-- Price labels -->
+  <g fill="#999" font-family="Inter,sans-serif" font-size="10">
+    <text x="30" y="64">5,480</text>
+    <text x="30" y="124">5,120</text>
+    <text x="30" y="184">4,760</text>
+    <text x="30" y="244">4,400</text>
+    <text x="30" y="304">4,040</text>
+  </g>
+  <!-- Candlesticks -->
+  <g>
+    <!-- Blue/up candles -->
+    <line x1="100" y1="200" x2="100" y2="130" stroke="#627eea" stroke-width="1.5"/>
+    <rect x="94" y="145" width="12" height="35" rx="2" fill="#627eea"/>
+
+    <line x1="180" y1="170" x2="180" y2="90" stroke="#627eea" stroke-width="1.5"/>
+    <rect x="174" y="110" width="12" height="40" rx="2" fill="#627eea"/>
+
+    <line x1="260" y1="150" x2="260" y2="70" stroke="#627eea" stroke-width="1.5"/>
+    <rect x="254" y="85" width="12" height="45" rx="2" fill="#627eea"/>
+
+    <line x1="340" y1="180" x2="340" y2="100" stroke="#627eea" stroke-width="1.5"/>
+    <rect x="334" y="115" width="12" height="38" rx="2" fill="#627eea"/>
+
+    <line x1="460" y1="130" x2="460" y2="55" stroke="#627eea" stroke-width="1.5"/>
+    <rect x="454" y="65" width="12" height="42" rx="2" fill="#627eea"/>
+
+    <line x1="540" y1="110" x2="540" y2="45" stroke="#627eea" stroke-width="1.5"/>
+    <rect x="534" y="55" width="12" height="30" rx="2" fill="#627eea"/>
+
+    <!-- Red candles -->
+    <line x1="140" y1="210" x2="140" y2="140" stroke="#ff4d4d" stroke-width="1.5"/>
+    <rect x="134" y="155" width="12" height="38" rx="2" fill="#ff4d4d"/>
+
+    <line x1="220" y1="175" x2="220" y2="100" stroke="#ff4d4d" stroke-width="1.5"/>
+    <rect x="214" y="115" width="12" height="40" rx="2" fill="#ff4d4d"/>
+
+    <line x1="300" y1="160" x2="300" y2="85" stroke="#ff4d4d" stroke-width="1.5"/>
+    <rect x="294" y="95" width="12" height="42" rx="2" fill="#ff4d4d"/>
+
+    <line x1="380" y1="155" x2="380" y2="80" stroke="#ff4d4d" stroke-width="1.5"/>
+    <rect x="374" y="92" width="12" height="36" rx="2" fill="#ff4d4d"/>
+
+    <line x1="420" y1="145" x2="420" y2="70" stroke="#ff4d4d" stroke-width="1.5"/>
+    <rect x="414" y="82" width="12" height="38" rx="2" fill="#ff4d4d"/>
+
+    <line x1="500" y1="125" x2="500" y2="50" stroke="#ff4d4d" stroke-width="1.5"/>
+    <rect x="494" y="60" width="12" height="40" rx="2" fill="#ff4d4d"/>
+  </g>
+  <!-- Area fill -->
+  <path d="M94,160 L134,172 L174,130 L214,135 L254,105 L294,116 L334,130 L374,108 L414,100 L454,82 L494,78 L534,65 L560,65 L560,340 L60,340 Z" fill="url(#ethGrad)"/>
+  <!-- Trend line -->
+  <polyline points="94,160 134,172 174,130 214,135 254,105 294,116 334,130 374,108 414,100 454,82 494,78 534,65" fill="none" stroke="#627eea" stroke-width="2.5" filter="url(#ethGlow)"/>
+  <!-- Current price dot -->
+  <circle cx="534" cy="65" r="5" fill="#627eea" filter="url(#ethGlow)"/>
+  <circle cx="534" cy="65" r="8" fill="none" stroke="#627eea" stroke-opacity="0.3" stroke-width="2"/>
+  <!-- Bottom bar -->
+  <rect x="60" y="340" width="500" height="40" rx="0" fill="#f3f4f6"/>
+  <g fill="#999" font-family="Inter,sans-serif" font-size="10">
+    <text x="80" y="365">ETH/cNGN</text>
+    <text x="200" y="365" fill="#627eea">+4.18%</text>
+    <text x="300" y="365">Vol: ₦1.8B</text>
+    <text x="430" y="365">24h High: ₦5,480</text>
+  </g>
+</svg>

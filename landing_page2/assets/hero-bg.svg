@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" fill="none">
+  <rect width="1440" height="900" fill="#F8F9FA"/>
+  <!-- Soft gradient mesh background like GRVT hero -->
+  <defs>
+    <radialGradient id="g1" cx="50%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#00e87b" stop-opacity="0.08"/>
+      <stop offset="50%" stop-color="#00e87b" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#F8F9FA" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g2" cx="80%" cy="60%" r="40%">
+      <stop offset="0%" stop-color="#00c853" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="#F8F9FA" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g3" cx="20%" cy="70%" r="35%">
+      <stop offset="0%" stop-color="#0066ff" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#F8F9FA" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#g1)"/>
+  <rect width="1440" height="900" fill="url(#g2)"/>
+  <rect width="1440" height="900" fill="url(#g3)"/>
+  <!-- Subtle grid lines -->
+  <g stroke="#000" stroke-opacity="0.03" stroke-width="1">
+    <line x1="0" y1="200" x2="1440" y2="200"/>
+    <line x1="0" y1="400" x2="1440" y2="400"/>
+    <line x1="0" y1="600" x2="1440" y2="600"/>
+    <line x1="360" y1="0" x2="360" y2="900"/>
+    <line x1="720" y1="0" x2="720" y2="900"/>
+    <line x1="1080" y1="0" x2="1080" y2="900"/>
+  </g>
+</svg>

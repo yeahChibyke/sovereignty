@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 400" fill="none">
+  <defs>
+    <linearGradient id="sg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00e87b" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#00b4d8" stop-opacity="0.06"/>
+    </linearGradient>
+  </defs>
+  <rect width="500" height="400" rx="24" fill="#fff" fill-opacity="0.6"/>
+  <rect x="1" y="1" width="498" height="398" rx="23" fill="none" stroke="#000" stroke-opacity="0.06"/>
+  <!-- Shield shape -->
+  <path d="M250,50 L370,100 L370,220 Q370,320 250,370 Q130,320 130,220 L130,100Z" fill="url(#sg)" stroke="#00e87b" stroke-width="2" stroke-opacity="0.3"/>
+  <path d="M250,80 L345,120 L345,215 Q345,300 250,340 Q155,300 155,215 L155,120Z" fill="none" stroke="#e5e7eb" stroke-width="1.5"/>
+  <!-- Interior shield icon -->
+  <g transform="translate(250,195)">
+    <!-- Checkmark -->
+    <circle cx="0" cy="0" r="40" fill="#00e87b" fill-opacity="0.1" stroke="#00e87b" stroke-width="2"/>
+    <polyline points="-18,0 -6,14 20,-12" fill="none" stroke="#00e87b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- Floating security labels -->
+  <g font-family="Inter,sans-serif" font-size="10">
+    <rect x="50" y="130" width="70" height="24" rx="12" fill="#f3f4f6" stroke="#e5e7eb"/>
+    <text x="85" y="146" fill="#6b7280" text-anchor="middle">On-Chain</text>
+    <rect x="380" y="130" width="80" height="24" rx="12" fill="#f3f4f6" stroke="#e5e7eb"/>
+    <text x="420" y="146" fill="#6b7280" text-anchor="middle">Non-Custodial</text>
+    <rect x="50" y="250" width="75" height="24" rx="12" fill="#f3f4f6" stroke="#e5e7eb"/>
+    <text x="87" y="266" fill="#6b7280" text-anchor="middle">Trustless</text>
+    <rect x="375" y="250" width="85" height="24" rx="12" fill="#f3f4f6" stroke="#e5e7eb"/>
+    <text x="417" y="266" fill="#6b7280" text-anchor="middle">Commit-Reveal</text>
+  </g>
+</svg>

@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Sovereignty — Your Gateway to Sovereign Trading</title>
+  <meta name="description" content="Trade perpetual futures margined in cNGN. Non-custodial. On-chain. Sovereign."/>
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png"/>
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png"/>
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700,800,900&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'Satoshi', system-ui, -apple-system, sans-serif; background: linear-gradient(180deg, #f7f8fa 0%, #f0f4fc 20%, #e8eff9 40%, #dfe8f5 58%, #d4dfef 74%, #c5d3ea 88%, #b8c9e4 100%); background-attachment: fixed; color: #1a1d26; -webkit-font-smoothing: antialiased; overflow-x: hidden; line-height: 1.6; min-height: 100vh; }
+    a { color: inherit; text-decoration: none; }
+    img { display: block; max-width: 100%; }
+
+    :root {
+      --green: #00b85e;
+      --green-dim: #00a352;
+      --green-bright: #00d96e;
+      --green-glow: rgba(0,184,94,0.18);
+      --bg: transparent;
+      --bg-surface: rgba(255,255,255,0.85);
+      --bg-elevated: rgba(238,240,244,0.8);
+      --bg-tinted: rgba(240,248,244,0.8);
+      --border: rgba(0,0,0,0.06);
+      --border-strong: rgba(0,0,0,0.1);
+      --text-primary: #0a0d14;
+      --text-secondary: #2d3342;
+      --text-tertiary: #5c6478;
+    }
+
+    /* ——— INTERSTELLAR BACKGROUND ——— */
+    .interstellar-bg { position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden; }
+
+    /* Ambient glow that follows comets (very subtle) */
+    .interstellar-bg .ambient { position: absolute; border-radius: 50%; filter: blur(100px); opacity: 0.5; }
+    .interstellar-bg .ambient-1 { width: 600px; height: 600px; top: 10%; left: 15%; background: radial-gradient(circle, rgba(0,184,94,0.1) 0%, transparent 70%); animation: ambientPulse 8s ease-in-out infinite; }
+    .interstellar-bg .ambient-2 { width: 500px; height: 500px; top: 50%; right: 10%; background: radial-gradient(circle, rgba(99,102,241,0.07) 0%, transparent 70%); animation: ambientPulse 12s ease-in-out infinite 3s; }
+    .interstellar-bg .ambient-3 { width: 700px; height: 700px; bottom: 5%; left: 30%; background: radial-gradient(circle, rgba(0,184,94,0.08) 0%, transparent 70%); animation: ambientPulse 10s ease-in-out infinite 6s; }
+    @keyframes ambientPulse { 0%,100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.7; transform: scale(1.1); } }
+
+    /* ——— COMETS ——— */
+    .comet {
+      position: absolute;
+      height: 3px;
+      border-radius: 100px;
+      pointer-events: none;
+      opacity: 0;
+    }
+    .comet::before {
+      content: '';
+      position: absolute;
+      right: 0; top: 50%; transform: translateY(-50%);
+      width: 8px; height: 8px;
+      border-radius: 50%;
+    }
+    /* Green comets */
+    .comet.green { background: linear-gradient(90deg, transparent 0%, rgba(0,184,94,0.1) 20%, rgba(0,184,94,0.45) 70%, rgba(0,184,94,0.8) 100%); }
+    .comet.green::before { background: rgba(0,255,136,0.9); box-shadow: 0 0 16px rgba(0,184,94,0.8), 0 0 40px rgba(0,184,94,0.4), 0 0 80px rgba(0,184,94,0.15); }
+    /* Indigo comets */
+    .comet.indigo { background: linear-gradient(90deg, transparent 0%, rgba(99,102,241,0.06) 20%, rgba(99,102,241,0.3) 70%, rgba(99,102,241,0.6) 100%); }
+    .comet.indigo::before { background: rgba(165,180,252,0.85); box-shadow: 0 0 16px rgba(99,102,241,0.7), 0 0 40px rgba(99,102,241,0.3); }
+    /* Cyan comets */
+    .comet.cyan { background: linear-gradient(90deg, transparent 0%, rgba(56,189,248,0.06) 20%, rgba(56,189,248,0.3) 70%, rgba(56,189,248,0.55) 100%); }
+    .comet.cyan::before { background: rgba(125,211,252,0.8); box-shadow: 0 0 16px rgba(56,189,248,0.6), 0 0 40px rgba(56,189,248,0.25); }
+    /* Gold comets */
+    .comet.gold { background: linear-gradient(90deg, transparent 0%, rgba(245,158,11,0.06) 20%, rgba(245,158,11,0.3) 70%, rgba(245,158,11,0.55) 100%); }
+    .comet.gold::before { background: rgba(252,211,77,0.8); box-shadow: 0 0 16px rgba(245,158,11,0.6), 0 0 40px rgba(245,158,11,0.2); }
+
+    /* Comet trajectories — dramatic diagonal swooshes, faster */
+    .comet-1 { width: 320px; top: 6%; animation: cometSwoosh1 7s cubic-bezier(0.25,0.1,0.25,1) infinite; }
+    .comet-2 { width: 240px; top: 18%; animation: cometSwoosh2 10s cubic-bezier(0.25,0.1,0.25,1) infinite 2s; }
+    .comet-3 { width: 380px; top: 32%; animation: cometSwoosh3 8s cubic-bezier(0.25,0.1,0.25,1) infinite 4s; }
+    .comet-4 { width: 200px; top: 48%; animation: cometSwoosh4 12s cubic-bezier(0.25,0.1,0.25,1) infinite 1s; }
+    .comet-5 { width: 300px; top: 60%; animation: cometSwoosh5 9s cubic-bezier(0.25,0.1,0.25,1) infinite 5s; }
+    .comet-6 { width: 180px; top: 72%; animation: cometSwoosh6 11s cubic-bezier(0.25,0.1,0.25,1) infinite 7s; }
+    .comet-7 { width: 260px; top: 15%; animation: cometSwoosh3 13s cubic-bezier(0.25,0.1,0.25,1) infinite 3s; }
+    .comet-8 { width: 350px; top: 85%; animation: cometSwoosh1 9s cubic-bezier(0.25,0.1,0.25,1) infinite 6s; }
+    .comet-9 { width: 220px; top: 40%; animation: cometSwoosh5 14s cubic-bezier(0.25,0.1,0.25,1) infinite 8s; }
+    .comet-10 { width: 280px; top: 55%; animation: cometSwoosh2 8s cubic-bezier(0.25,0.1,0.25,1) infinite 10s; }
+
+    @keyframes cometSwoosh1 {
+      0% { left: -300px; transform: rotate(-12deg); opacity: 0; }
+      5% { opacity: 0.8; }
+      40% { opacity: 0.9; }
+      50% { left: 110%; transform: rotate(-8deg); opacity: 0; }
+      100% { left: 110%; opacity: 0; }
+    }
+    @keyframes cometSwoosh2 {
+      0% { right: -250px; left: auto; transform: rotate(195deg); opacity: 0; }
+      5% { opacity: 0.7; }
+      35% { opacity: 0.8; }
+      45% { right: 110%; transform: rotate(188deg); opacity: 0; }
+      100% { right: 110%; opacity: 0; }
+    }
+    @keyframes cometSwoosh3 {
+      0% { left: -350px; transform: rotate(-6deg); opacity: 0; }
+      4% { opacity: 0.9; }
+      38% { opacity: 0.85; }
+      48% { left: 115%; transform: rotate(-2deg); opacity: 0; }
+      100% { left: 115%; opacity: 0; }
+    }
+    @keyframes cometSwoosh4 {
+      0% { right: -200px; left: auto; transform: rotate(192deg); opacity: 0; }
+      6% { opacity: 0.6; }
+      32% { opacity: 0.7; }
+      42% { right: 110%; transform: rotate(185deg); opacity: 0; }
+      100% { right: 110%; opacity: 0; }
+    }
+    @keyframes cometSwoosh5 {
+      0% { left: -280px; transform: rotate(-18deg); opacity: 0; }
+      5% { opacity: 0.75; }
+      36% { opacity: 0.8; }
+      46% { left: 112%; transform: rotate(-10deg); opacity: 0; }
+      100% { left: 112%; opacity: 0; }
+    }
+    @keyframes cometSwoosh6 {
+      0% { right: -180px; left: auto; transform: rotate(200deg); opacity: 0; }
+      4% { opacity: 0.5; }
+      28% { opacity: 0.6; }
+      38% { right: 112%; transform: rotate(190deg); opacity: 0; }
+      100% { right: 112%; opacity: 0; }
+    }
+
+    /* Star field particles */
+    .interstellar-bg .stars { position: absolute; inset: 0; }
+    .interstellar-bg .star { position: absolute; border-radius: 50%; background: rgba(0,0,0,0.07); animation: twinkle 4s ease-in-out infinite; }
+    .interstellar-bg .star.bright { background: rgba(0,184,94,0.15); }
+    @keyframes twinkle { 0%,100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 1; transform: scale(1.4); } }
+
+    /* ——— FLOATING ASSET LOGOS ——— */
+    .asset-particles { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+    .asset-particle {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .asset-particle svg { width: 100%; height: 100%; }
+    /* Swoosh trajectories for asset logos */
+    .asset-particle.swoosh-lr {
+      animation: assetSwooshLR var(--dur, 18s) cubic-bezier(0.22,0.61,0.36,1) infinite var(--delay, 0s);
+    }
+    .asset-particle.swoosh-rl {
+      animation: assetSwooshRL var(--dur, 20s) cubic-bezier(0.22,0.61,0.36,1) infinite var(--delay, 0s);
+    }
+    .asset-particle.float-drift {
+      animation: assetFloat var(--dur, 15s) ease-in-out infinite var(--delay, 0s);
+    }
+    @keyframes assetSwooshLR {
+      0% { transform: translate(-120px, var(--startY, 0px)) rotate(var(--rot, 0deg)) scale(var(--sc, 1)); opacity: 0; }
+      8% { opacity: var(--peak-op, 0.06); }
+      45% { opacity: var(--peak-op, 0.06); }
+      55% { transform: translate(calc(100vw + 120px), var(--endY, 0px)) rotate(calc(var(--rot, 0deg) + 45deg)) scale(var(--sc, 1)); opacity: 0; }
+      100% { transform: translate(calc(100vw + 120px), var(--endY, 0px)) rotate(calc(var(--rot, 0deg) + 45deg)) scale(var(--sc, 1)); opacity: 0; }
+    }
+    @keyframes assetSwooshRL {
+      0% { transform: translate(calc(100vw + 120px), var(--startY, 0px)) rotate(var(--rot, 0deg)) scale(var(--sc, 1)); opacity: 0; }
+      8% { opacity: var(--peak-op, 0.06); }
+      45% { opacity: var(--peak-op, 0.06); }
+      55% { transform: translate(-120px, var(--endY, 0px)) rotate(calc(var(--rot, 0deg) - 45deg)) scale(var(--sc, 1)); opacity: 0; }
+      100% { transform: translate(-120px, var(--endY, 0px)) rotate(calc(var(--rot, 0deg) - 45deg)) scale(var(--sc, 1)); opacity: 0; }
+    }
+    @keyframes assetFloat {
+      0%,100% { transform: translate(0, 0) rotate(0deg) scale(var(--sc, 1)); opacity: var(--peak-op, 0.04); }
+      25% { transform: translate(30px, -20px) rotate(8deg) scale(var(--sc, 1)); opacity: calc(var(--peak-op, 0.04) * 1.3); }
+      50% { transform: translate(-15px, -40px) rotate(-5deg) scale(var(--sc, 1)); opacity: var(--peak-op, 0.04); }
+      75% { transform: translate(-30px, -10px) rotate(12deg) scale(var(--sc, 1)); opacity: calc(var(--peak-op, 0.04) * 1.2); }
+    }
+
+    /* ——— NAV ——— */
+    .nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; transition: box-shadow 0.3s; }
+    .nav.scrolled { box-shadow: 0 4px 24px rgba(0,0,0,0.06); }
+    .nav-bg { position: absolute; inset: 0; background: rgba(245,246,248,0.65); backdrop-filter: blur(28px); -webkit-backdrop-filter: blur(28px); border-bottom: 1px solid var(--border); transition: background 0.3s; }
+    .nav.scrolled .nav-bg { background: rgba(245,246,248,0.88); }
+    .nav-inner { position: relative; max-width: 1200px; margin: 0 auto; padding: 0 2rem; height: 72px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-logo { display: flex; align-items: center; gap: 0.625rem; }
+    .nav-logo span { font-weight: 800; font-size: 1.0625rem; color: var(--text-primary); letter-spacing: -0.02em; }
+    .nav-links { display: flex; gap: 2.25rem; }
+    .nav-links a { font-size: 0.875rem; font-weight: 500; color: var(--text-secondary); transition: color 0.2s; position: relative; }
+    .nav-links a:hover { color: var(--text-primary); }
+    .nav-links a::after { content: ''; position: absolute; bottom: -4px; left: 0; right: 0; height: 2px; background: var(--green); transform: scaleX(0); transition: transform 0.25s cubic-bezier(0.16,1,0.3,1); border-radius: 1px; }
+    .nav-links a:hover::after { transform: scaleX(1); }
+    .nav-right { display: flex; align-items: center; gap: 1rem; }
+    .btn-primary { display: inline-flex; align-items: center; background: var(--green); color: #fff; padding: 0.625rem 1.5rem; border-radius: 8px; font-size: 0.8125rem; font-weight: 700; border: none; cursor: pointer; transition: all 0.25s cubic-bezier(0.16,1,0.3,1); letter-spacing: 0.03em; box-shadow: 0 2px 12px rgba(0,184,94,0.3); }
+    .btn-primary:hover { background: var(--green-dim); transform: translateY(-2px); box-shadow: 0 6px 24px rgba(0,184,94,0.4); }
+    .btn-primary:active { transform: translateY(0); box-shadow: 0 2px 8px rgba(0,184,94,0.3); }
+    .hero-actions .btn-primary { animation: ctaGlow 3s ease-in-out infinite; }
+    @keyframes ctaGlow { 0%, 100% { box-shadow: 0 2px 12px rgba(0,184,94,0.3); } 50% { box-shadow: 0 4px 20px rgba(0,184,94,0.5), 0 0 40px rgba(0,184,94,0.15); } }
+    .btn-secondary { display: inline-flex; align-items: center; border: 1px solid var(--border-strong); color: var(--text-secondary); padding: 0.625rem 1.5rem; border-radius: 8px; font-size: 0.8125rem; font-weight: 600; background: var(--bg-surface); cursor: pointer; transition: all 0.25s cubic-bezier(0.16,1,0.3,1); }
+    .btn-secondary:hover { border-color: rgba(0,0,0,0.2); color: var(--text-primary); box-shadow: 0 4px 12px rgba(0,0,0,0.06); transform: translateY(-1px); }
+    .icon-link { display: flex; color: var(--text-tertiary); transition: color 0.2s; }
+    .icon-link:hover { color: var(--text-primary); }
+    .mob-toggle { display: none; background: none; border: none; color: var(--text-primary); cursor: pointer; }
+
+    /* ——— HERO ——— */
+    .hero { position: relative; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 10rem 2rem 6rem; overflow: hidden; }
+
+    /* Globe / atmospheric background */
+    .hero-atmosphere { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    .hero-atmosphere svg { position: absolute; top: -20%; left: 50%; transform: translateX(-50%); width: 140%; max-width: 1600px; height: auto; opacity: 0.5; }
+
+    /* Spinning comet ring around hero text */
+    .hero-comet-ring { position: absolute; top: 50%; left: 50%; width: 700px; height: 700px; transform: translate(-50%, -55%); pointer-events: none; z-index: 0; }
+    .hero-comet-ring .ring-track { position: absolute; inset: 0; animation: ringOrbit 10s linear infinite; }
+    .hero-comet-ring .ring-track-2 { position: absolute; inset: -30px; animation: ringOrbit 14s linear infinite reverse; }
+    .hero-comet-ring .ring-track-3 { position: absolute; inset: -60px; animation: ringOrbit 18s linear infinite 2s; }
+    .ring-comet {
+      position: absolute;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      top: 0; left: 50%;
+      transform: translateX(-50%);
+    }
+    .ring-comet::after {
+      content: '';
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+    }
+    .ring-comet.rc-green { background: rgba(0,184,94,0.9); box-shadow: 0 0 24px rgba(0,184,94,0.8), 0 0 60px rgba(0,184,94,0.4), 0 0 120px rgba(0,184,94,0.15); }
+    .ring-comet.rc-green::after { width: 6px; height: 6px; background: #00ff88; box-shadow: 0 0 12px #00ff88; }
+    .ring-comet.rc-indigo { background: rgba(99,102,241,0.8); box-shadow: 0 0 20px rgba(99,102,241,0.7), 0 0 50px rgba(99,102,241,0.3); width: 10px; height: 10px; }
+    .ring-comet.rc-indigo::after { width: 5px; height: 5px; background: #a5b4fc; box-shadow: 0 0 10px #a5b4fc; }
+    .ring-comet.rc-cyan { background: rgba(56,189,248,0.7); box-shadow: 0 0 18px rgba(56,189,248,0.6), 0 0 45px rgba(56,189,248,0.25); width: 9px; height: 9px; }
+    .ring-comet.rc-cyan::after { width: 4px; height: 4px; background: #7dd3fc; box-shadow: 0 0 8px #7dd3fc; }
+    /* Comet trails that follow the ring */
+    .ring-trail {
+      position: absolute;
+      top: 0; left: 50%;
+      width: 120px; height: 4px;
+      transform-origin: left center;
+      transform: translateX(-100%) rotate(0deg);
+      border-radius: 100px;
+    }
+    .ring-trail.rt-green { background: linear-gradient(90deg, transparent, rgba(0,184,94,0.6)); }
+    .ring-trail.rt-indigo { background: linear-gradient(90deg, transparent, rgba(99,102,241,0.45)); width: 90px; height: 3px; }
+    .ring-trail.rt-cyan { background: linear-gradient(90deg, transparent, rgba(56,189,248,0.4)); width: 80px; height: 3px; }
+    /* Elliptical ring visible path */
+    .ring-path {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 1.5px solid rgba(0,184,94,0.12);
+    }
+    .ring-track-2 .ring-path { border-color: rgba(99,102,241,0.08); }
+    .ring-track-3 .ring-path { border-color: rgba(56,189,248,0.06); }
+    @keyframes ringOrbit { 0% { transform: rotateX(65deg) rotateZ(0deg); } 100% { transform: rotateX(65deg) rotateZ(360deg); } }
+    .hero-comet-ring { perspective: 800px; }
+
+    /* Ambient glow behind ring */
+    .hero-ring-glow { position: absolute; top: 50%; left: 50%; width: 600px; height: 400px; transform: translate(-50%, -55%); background: radial-gradient(ellipse, rgba(0,184,94,0.12) 0%, rgba(99,102,241,0.04) 40%, transparent 65%); filter: blur(40px); pointer-events: none; }
+    .hero-fade { position: absolute; bottom: 0; left: 0; right: 0; height: 120px; background: linear-gradient(to bottom, transparent, rgba(247,248,250,0.4)); pointer-events: none; }
+
+    .hero-content { position: relative; z-index: 1; max-width: 720px; }
+    .hero h1 { font-size: clamp(2.75rem, 6vw, 4.5rem); font-weight: 800; line-height: 1.08; letter-spacing: -0.04em; color: var(--text-primary); margin-bottom: 1.5rem; }
+    .hero h1 .accent { color: var(--green); }
+    .hero-sub { font-size: 1.125rem; color: var(--text-secondary); max-width: 480px; margin: 0 auto 2.5rem; line-height: 1.7; }
+    .hero-actions { display: flex; gap: 0.75rem; justify-content: center; margin-bottom: 5rem; }
+
+    /* Stats row */
+    .hero-stats { position: relative; z-index: 1; display: flex; justify-content: center; gap: 0; background: rgba(255,255,255,0.6); backdrop-filter: blur(12px); border-radius: 16px; border: 1px solid var(--border); padding: 1.5rem 0; box-shadow: 0 4px 16px rgba(0,0,0,0.04); }
+    .hero-stat { text-align: center; flex: 1; position: relative; }
+    .hero-stat:not(:last-child)::after { content: ''; position: absolute; right: 0; top: 15%; height: 70%; width: 1px; background: var(--border); }
+    .hero-stat-val { font-size: 1.75rem; font-weight: 800; color: var(--green); letter-spacing: -0.02em; }
+    .hero-stat-label { font-size: 0.75rem; color: var(--text-tertiary); margin-top: 0.25rem; letter-spacing: 0.06em; text-transform: uppercase; }
+
+    /* ——— DIVIDER ——— */
+    .divider { height: 1px; background: linear-gradient(90deg, transparent 5%, var(--border-strong) 30%, var(--border-strong) 70%, transparent 95%); }
+
+    /* ——— SECTION ——— */
+    .section { max-width: 1200px; margin: 0 auto; padding: 8rem 2rem; position: relative; }
+    .section-header { margin-bottom: 4.5rem; }
+    .section-header.center { text-align: center; }
+    .section-tag { display: inline-block; font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; color: var(--green); margin-bottom: 1.25rem; padding: 0.375rem 0.875rem; border-radius: 100px; background: rgba(0,184,94,0.06); border: 1px solid rgba(0,184,94,0.12); }
+    .section-title { font-size: clamp(1.75rem, 3.5vw, 2.75rem); font-weight: 800; letter-spacing: -0.03em; line-height: 1.15; color: var(--text-primary); }
+    .section-subtitle { font-size: 1.0625rem; color: var(--text-secondary); max-width: 520px; margin-top: 1rem; line-height: 1.7; }
+    .section-header.center .section-subtitle { margin-left: auto; margin-right: auto; }
+
+    /* ——— FEATURES ——— */
+    .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; }
+    .feature { padding: 2rem; border-radius: 16px; background: rgba(255,255,255,0.7); backdrop-filter: blur(8px); border: 1px solid var(--border); transition: all 0.35s cubic-bezier(0.16,1,0.3,1); box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+    .feature:hover { transform: translateY(-4px); border-color: rgba(0,184,94,0.15); box-shadow: 0 12px 32px rgba(0,0,0,0.06), 0 0 0 1px rgba(0,184,94,0.06); }
+    .feature-icon { width: 52px; height: 52px; border-radius: 14px; display: flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; }
+    .feature h3 { font-size: 1.25rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.75rem; }
+    .feature p { font-size: 0.9375rem; color: var(--text-secondary); line-height: 1.7; }
+
+    /* ——— SHOWCASE ——— */
+    .showcase-section { position: relative; overflow: hidden; }
+    .showcase-section .showcase-glow { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 900px; height: 700px; background: radial-gradient(ellipse, rgba(0,184,94,0.06) 0%, transparent 60%); pointer-events: none; filter: blur(40px); }
+    .showcase-wrap { max-width: 1200px; margin: 0 auto; padding: 8rem 2rem; }
+    .showcase-layout { display: grid; grid-template-columns: 1fr 1.1fr; gap: 5rem; align-items: center; }
+    .showcase-text .section-subtitle { max-width: 420px; }
+    .showcase-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem 2.5rem; margin-top: 2.5rem; }
+    .showcase-meta-item { padding-left: 1rem; border-left: 2px solid rgba(0,184,94,0.15); }
+    .showcase-meta-label { font-size: 0.6875rem; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.25rem; }
+    .showcase-meta-val { font-size: 1rem; font-weight: 700; color: var(--text-primary); }
+
+    /* Chart card */
+    .chart-card { border-radius: 16px; border: 1px solid var(--border); background: rgba(255,255,255,0.9); backdrop-filter: blur(8px); overflow: hidden; box-shadow: 0 16px 48px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.02); transition: box-shadow 0.35s, transform 0.35s; }
+    .chart-card:hover { box-shadow: 0 20px 56px rgba(0,0,0,0.1), 0 0 0 1px rgba(0,184,94,0.08); transform: translateY(-2px); }
+    .chart-card-tabs { display: flex; border-bottom: 1px solid var(--border); }
+    .chart-card-tab { flex: 1; padding: 0.875rem; text-align: center; font-size: 0.8125rem; font-weight: 700; color: var(--text-tertiary); background: transparent; border: none; cursor: pointer; transition: all 0.2s; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+    .chart-card-tab.active { color: var(--green); border-bottom-color: var(--green); background: rgba(0,184,94,0.03); }
+    .chart-card-tab:hover:not(.active) { color: var(--text-secondary); }
+    .chart-card-body { position: relative; }
+    .chart-card-body img { width: 100%; display: block; transition: opacity 0.6s; }
+    .chart-card-body img.hidden { opacity: 0; position: absolute; top: 0; left: 0; }
+    .chart-card-body img.visible { opacity: 1; position: relative; }
+    @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-14px); } }
+    .float-anim { animation: float 5s ease-in-out infinite; }
+
+    /* ——— TICKER ——— */
+    .ticker { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.7); backdrop-filter: blur(8px); overflow: hidden; padding: 1rem 0; }
+    .ticker-track { display: flex; gap: 3rem; animation: ticker-scroll 28s linear infinite; width: max-content; }
+    .ticker-item { display: flex; align-items: center; gap: 0.625rem; white-space: nowrap; }
+    .ticker-pair { font-size: 0.875rem; font-weight: 700; color: var(--text-primary); }
+    .ticker-price { font-size: 0.875rem; color: var(--text-secondary); }
+    .ticker-change { font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 4px; }
+    .ticker-up { background: rgba(0,184,94,0.08); color: var(--green); }
+    .ticker-down { background: rgba(239,68,68,0.08); color: #dc2626; }
+    .ticker-sep { width: 3px; height: 3px; border-radius: 50%; background: rgba(0,0,0,0.1); }
+    @keyframes ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+
+    /* ——— QUOTE ——— */
+    .quote-section { padding: 7rem 2rem; text-align: center; position: relative; }
+    .quote-section::before { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 700px; height: 400px; background: radial-gradient(ellipse, rgba(0,184,94,0.06) 0%, transparent 60%); pointer-events: none; filter: blur(40px); }
+    .quote-mark { font-size: 6rem; line-height: 0.8; color: rgba(0,184,94,0.28); font-family: Georgia, serif; position: relative; z-index: 1; }
+    .quote-text { font-size: clamp(1.25rem, 2.5vw, 1.625rem); font-weight: 500; line-height: 1.6; max-width: 640px; margin: 0.5rem auto 1.5rem; color: var(--text-primary); position: relative; z-index: 1; }
+    .quote-text em { font-style: normal; color: var(--green); font-weight: 600; }
+    .quote-attr { font-size: 0.8125rem; color: var(--text-tertiary); position: relative; z-index: 1; }
+
+    /* ——— POWERED BY ——— */
+    .powered-section { padding: 3.5rem 2rem; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: rgba(255,255,255,0.7); backdrop-filter: blur(8px); }
+    .powered-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: center; gap: 3.5rem; flex-wrap: wrap; }
+    .powered-label { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.15em; color: var(--text-tertiary); }
+    .powered-item { display: flex; align-items: center; gap: 0.5rem; color: var(--text-tertiary); opacity: 0.65; transition: opacity 0.3s, transform 0.3s; }
+    .powered-item:hover { opacity: 0.9; transform: translateY(-1px); }
+    .powered-item svg { width: 22px; height: 22px; }
+    .powered-item span { font-size: 0.875rem; font-weight: 600; }
+
+    /* ——— STEPS ——— */
+    .steps-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2rem; margin-top: 4rem; }
+    .step-item { position: relative; }
+    .step-num { font-size: 4rem; font-weight: 900; line-height: 1; color: rgba(0,80,30,0.75); margin-bottom: 1rem; }
+    .step-item h3 { font-size: 1.0625rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.5rem; }
+    .step-item p { font-size: 0.875rem; color: var(--text-secondary); line-height: 1.7; }
+    .step-item:not(:last-child)::after { content: '→'; position: absolute; top: 1.8rem; right: -1.25rem; width: auto; height: auto; font-size: 1.25rem; color: rgba(0,184,94,0.4); background: none; }
+
+    /* ——— VISUAL SECTIONS ——— */
+    .visual-section { position: relative; border-top: 1px solid var(--border); overflow: hidden; }
+    .visual-section .vs-glow { position: absolute; pointer-events: none; filter: blur(60px); }
+    .visual-section .vs-glow-1 { top: -100px; right: -100px; width: 600px; height: 600px; background: radial-gradient(circle, rgba(0,184,94,0.07) 0%, transparent 55%); }
+    .visual-section .vs-glow-2 { bottom: -100px; left: -100px; width: 500px; height: 500px; background: radial-gradient(circle, rgba(99,102,241,0.04) 0%, transparent 55%); }
+    .vs-inner { max-width: 1200px; margin: 0 auto; padding: 8rem 2rem; }
+    .vs-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 5rem; align-items: center; }
+    .vs-layout.reverse { direction: rtl; }
+    .vs-layout.reverse > * { direction: ltr; }
+    .vs-cards { display: grid; gap: 1rem; }
+    .vs-card { padding: 1.5rem; border-radius: 12px; background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); border: 1px solid var(--border); transition: all 0.35s cubic-bezier(0.16,1,0.3,1); box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+    .vs-card:hover { transform: translateY(-3px); border-color: rgba(0,184,94,0.18); box-shadow: 0 8px 24px rgba(0,184,94,0.08), 0 2px 8px rgba(0,0,0,0.04); }
+    .vs-card h4 { font-size: 0.9375rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.375rem; display: flex; align-items: center; gap: 0.5rem; }
+    .vs-card h4 svg { flex-shrink: 0; }
+    .vs-card p { font-size: 0.8125rem; color: var(--text-secondary); line-height: 1.65; }
+
+    /* ——— FAQ ——— */
+    .faq-section { background: rgba(255,255,255,0.65); backdrop-filter: blur(8px); border-top: 1px solid var(--border); position: relative; overflow: hidden; }
+    .faq-list { max-width: 720px; margin: 0 auto; }
+    .faq-item { border-bottom: 1px solid var(--border); }
+    .faq-item summary { padding: 1.5rem 0; font-size: 1.0625rem; font-weight: 600; cursor: pointer; list-style: none; display: flex; justify-content: space-between; align-items: center; color: var(--text-primary); transition: color 0.2s; }
+    .faq-item summary:hover { color: var(--green); }
+    .faq-item summary::after { content: '+'; font-size: 1.5rem; font-weight: 300; color: var(--text-tertiary); margin-left: 1rem; flex-shrink: 0; }
+    .faq-item[open] summary::after { content: '\2212'; }
+    .faq-item .faq-body { padding: 0 0 1.5rem; font-size: 0.9375rem; color: var(--text-secondary); line-height: 1.7; animation: faqOpen 0.3s ease-out; }
+    @keyframes faqOpen { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* Status pill */
+    .status-pill { display: inline-flex; align-items: center; gap: 0.625rem; padding: 0.5rem 1.25rem; border-radius: 100px; border: 1px solid rgba(0,184,94,0.12); background: rgba(0,184,94,0.04); font-size: 0.75rem; color: var(--text-secondary); margin-top: 2.5rem; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px rgba(0,184,94,0.5); animation: pulse 2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(0,184,94,0.4); } 50% { box-shadow: 0 0 0 6px rgba(0,184,94,0); } }
+
+    /* ——— CTA ——— */
+    .cta-section { padding: 8rem 2rem; text-align: center; position: relative; overflow: hidden; }
+    .cta-section::before { content: ''; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); width: 900px; height: 600px; background: radial-gradient(ellipse, rgba(0,184,94,0.07) 0%, transparent 55%); pointer-events: none; filter: blur(40px); }
+    .cta-section h2 { font-size: clamp(2.25rem, 5vw, 3.5rem); font-weight: 800; letter-spacing: -0.03em; color: var(--text-primary); margin-bottom: 1rem; position: relative; z-index: 1; }
+    .cta-section h2 span { color: var(--green); }
+    .cta-sub { font-size: 1.0625rem; color: var(--text-secondary); margin-bottom: 2.5rem; max-width: 420px; margin-left: auto; margin-right: auto; position: relative; z-index: 1; }
+    .wl-form { display: flex; gap: 0.5rem; max-width: 420px; margin: 0 auto; position: relative; z-index: 1; }
+    .wl-form input { flex: 1; padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid rgba(0,0,0,0.12); background: rgba(255,255,255,0.7); backdrop-filter: blur(8px); color: var(--text-primary); font-size: 0.9375rem; outline: none; font-family: inherit; transition: border-color 0.2s, box-shadow 0.2s; }
+    .wl-form input::placeholder { color: var(--text-tertiary); }
+    .wl-form input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(0,184,94,0.15); }
+    .btn-primary:focus-visible, .btn-secondary:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+    .wl-form input:focus-visible { outline: none; }
+
+    /* ——— FOOTER ——— */
+    .footer { border-top: 1px solid var(--border); padding: 4rem 2rem 2rem; background: rgba(180,196,226,0.6); backdrop-filter: blur(12px); }
+    .footer-inner { max-width: 1200px; margin: 0 auto; }
+    .footer-grid { display: grid; grid-template-columns: 2fr repeat(3, 1fr); gap: 3rem; margin-bottom: 3rem; }
+    .footer-brand p { font-size: 0.875rem; color: var(--text-secondary); line-height: 1.65; margin-top: 0.75rem; max-width: 280px; }
+    .footer-col h4 { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-tertiary); margin-bottom: 1rem; }
+    .footer-col a { display: block; font-size: 0.875rem; color: var(--text-secondary); padding: 0.375rem 0; transition: color 0.2s; }
+    .footer-col a:hover { color: var(--text-primary); }
+    .footer-bottom { border-top: 1px solid rgba(0,0,0,0.08); padding-top: 1.5rem; display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; color: var(--text-tertiary); }
+    .footer-social { display: flex; gap: 1.25rem; }
+    .footer-social a { color: var(--text-tertiary); transition: color 0.2s; }
+    .footer-social a:hover { color: var(--text-primary); }
+
+    /* ——— MOBILE MENU ——— */
+    .mob-menu { display: none; position: fixed; inset: 0; background: rgba(235,240,250,0.96); backdrop-filter: blur(20px); z-index: 200; flex-direction: column; align-items: center; justify-content: center; gap: 1.75rem; }
+    .mob-menu.open { display: flex; }
+    .mob-menu a { font-size: 1.25rem; font-weight: 500; color: var(--text-secondary); }
+    .mob-menu a:hover { color: var(--text-primary); }
+
+    /* ——— SCROLL REVEAL ——— */
+    .rv { opacity: 0; transform: translateY(28px); transition: opacity 0.7s cubic-bezier(0.16,1,0.3,1), transform 0.7s cubic-bezier(0.16,1,0.3,1); }
+    .rv.visible { opacity: 1; transform: translateY(0); }
+
+    /* ——— RESPONSIVE ——— */
+    @media (max-width: 1024px) {
+      .features-grid { grid-template-columns: repeat(2, 1fr); gap: 3rem; }
+      .showcase-layout, .vs-layout { grid-template-columns: 1fr; gap: 3rem; }
+      .vs-layout.reverse { direction: ltr; }
+      .steps-grid { grid-template-columns: repeat(2, 1fr); }
+      .step-item::after { display: none; }
+      .footer-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .mob-toggle { display: block; }
+      .hero { padding: 8rem 1.5rem 4rem; min-height: auto; }
+      .hero h1 { font-size: 2.25rem; }
+      .hero-actions { flex-direction: column; align-items: center; }
+      .hero-actions .btn-primary, .hero-actions .btn-secondary { width: 100%; max-width: 280px; justify-content: center; }
+      .hero-stats { flex-direction: row; gap: 0; flex-wrap: wrap; padding: 1rem 0; }
+      .hero-stat:not(:last-child)::after { height: 50%; top: 25%; }
+      .hero-comet-ring { width: 400px !important; height: 400px !important; }
+      .features-grid, .steps-grid { grid-template-columns: 1fr; }
+      .footer-grid { grid-template-columns: 1fr; }
+      .footer-bottom { flex-direction: column; gap: 0.75rem; text-align: center; }
+      .wl-form { flex-direction: column; }
+      .showcase-meta { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body id="top">
+
+  <!-- INTERSTELLAR BACKGROUND — fixed, visible across ALL sections -->
+  <div class="interstellar-bg">
+    <!-- Ambient glows -->
+    <div class="ambient ambient-1"></div>
+    <div class="ambient ambient-2"></div>
+    <div class="ambient ambient-3"></div>
+    <!-- Comets -->
+    <div class="comet comet-1 green"></div>
+    <div class="comet comet-2 indigo"></div>
+    <div class="comet comet-3 green"></div>
+    <div class="comet comet-4 cyan"></div>
+    <div class="comet comet-5 green"></div>
+    <div class="comet comet-6 indigo"></div>
+    <div class="comet comet-7 gold"></div>
+    <div class="comet comet-8 cyan"></div>
+    <div class="comet comet-9 green"></div>
+    <div class="comet comet-10 gold"></div>
+    <!-- Stars -->
+    <div class="stars" id="starfield"></div>
+  </div>
+
+  <!-- NAV -->
+  <nav class="nav">
+    <div class="nav-bg"></div>
+    <div class="nav-inner">
+      <a href="#top" class="nav-logo">
+        <svg viewBox="0 0 512 512" width="28" height="28" fill="none"><g transform="translate(256,256)"><path d="M-90,-160 L90,-160 L110,-55 L110,55 L90,160 L-90,160 L-110,55 L-110,-55Z" fill="#00b85e"/><path d="M-65,-125 L65,-125 L65,-85 L-65,-85Z" fill="#ffffff"/><path d="M-65,-85 L-25,-85 L-25,-20 L-65,-20Z" fill="#ffffff"/><path d="M-65,-20 L65,-20 L65,20 L-65,20Z" fill="#ffffff"/><path d="M25,20 L65,20 L65,85 L25,85Z" fill="#ffffff"/><path d="M-65,85 L65,85 L65,125 L-65,125Z" fill="#ffffff"/></g></svg>
+        <span>Sovereignty</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#how-it-works">How It Works</a>
+        <a href="#architecture">Architecture</a>
+        <a href="#faq">FAQ</a>
+      </div>
+      <div class="nav-right">
+        <a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener" class="icon-link">
+          <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        </a>
+        <a href="#waitlist" class="btn-primary" id="nav-cta">GET EARLY ACCESS</a>
+        <button class="mob-toggle" onclick="toggleMob()" aria-label="Menu">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Mobile menu -->
+  <div class="mob-menu" id="mob-menu">
+    <button onclick="toggleMob()" style="position:absolute;top:1.5rem;right:1.5rem;background:none;border:none;color:var(--text-primary);cursor:pointer;">
+      <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+    <a href="#features" onclick="toggleMob()">Features</a>
+    <a href="#how-it-works" onclick="toggleMob()">How It Works</a>
+    <a href="#architecture" onclick="toggleMob()">Architecture</a>
+    <a href="#faq" onclick="toggleMob()">FAQ</a>
+    <a href="#waitlist" onclick="toggleMob()" class="btn-primary">GET EARLY ACCESS</a>
+  </div>
+
+  <!-- ===== HERO ===== -->
+  <section class="hero">
+    <div class="hero-atmosphere">
+      <svg viewBox="0 0 1200 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <radialGradient id="globe-g" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#b8e6d0" stop-opacity="0.3"/>
+            <stop offset="40%" stop-color="#d4ede1" stop-opacity="0.15"/>
+            <stop offset="100%" stop-color="#eaf0fc" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="glow-g" cx="50%" cy="45%" r="45%">
+            <stop offset="0%" stop-color="#00b85e" stop-opacity="0.06"/>
+            <stop offset="50%" stop-color="#00b85e" stop-opacity="0.02"/>
+            <stop offset="100%" stop-color="#eaf0fc" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <ellipse cx="600" cy="400" rx="500" ry="400" fill="url(#glow-g)"/>
+        <circle cx="600" cy="420" r="300" fill="url(#globe-g)"/>
+        <g stroke="rgba(0,184,94,0.1)" stroke-width="0.6" fill="none">
+          <ellipse cx="600" cy="420" rx="300" ry="300"/>
+          <ellipse cx="600" cy="420" rx="300" ry="240"/>
+          <ellipse cx="600" cy="420" rx="300" ry="180"/>
+          <ellipse cx="600" cy="420" rx="300" ry="120"/>
+          <ellipse cx="600" cy="420" rx="300" ry="60"/>
+          <ellipse cx="600" cy="420" rx="300" ry="300" transform="rotate(90 600 420)"/>
+          <ellipse cx="600" cy="420" rx="240" ry="300"/>
+          <ellipse cx="600" cy="420" rx="180" ry="300"/>
+          <ellipse cx="600" cy="420" rx="120" ry="300"/>
+          <ellipse cx="600" cy="420" rx="60" ry="300"/>
+        </g>
+        <circle cx="600" cy="420" r="300" stroke="rgba(0,184,94,0.08)" stroke-width="1" fill="none"/>
+        <g fill="#00b85e">
+          <circle cx="500" cy="350" r="2" opacity="0.25"/>
+          <circle cx="680" cy="300" r="1.5" opacity="0.2"/>
+          <circle cx="550" cy="500" r="1.5" opacity="0.18"/>
+          <circle cx="720" cy="450" r="2" opacity="0.15"/>
+          <circle cx="450" cy="420" r="1.5" opacity="0.25"/>
+          <circle cx="750" cy="380" r="1.5" opacity="0.18"/>
+          <circle cx="620" cy="280" r="1.5" opacity="0.25"/>
+          <circle cx="580" cy="550" r="2" opacity="0.15"/>
+          <circle cx="650" cy="520" r="1.5" opacity="0.18"/>
+          <circle cx="530" cy="320" r="1.5" opacity="0.2"/>
+        </g>
+      </svg>
+    </div>
+    <div class="hero-ring-glow"></div>
+    <div class="hero-comet-ring">
+      <div class="ring-track">
+        <div class="ring-path"></div>
+        <div class="ring-comet rc-green"></div>
+        <div class="ring-trail rt-green"></div>
+      </div>
+      <div class="ring-track-2">
+        <div class="ring-path"></div>
+        <div class="ring-comet rc-indigo" style="top:auto;bottom:0;"></div>
+        <div class="ring-trail rt-indigo" style="top:auto;bottom:0;"></div>
+      </div>
+      <div class="ring-track-3">
+        <div class="ring-path"></div>
+        <div class="ring-comet rc-cyan" style="left:0;top:50%;"></div>
+        <div class="ring-trail rt-cyan" style="left:0;top:50%;"></div>
+      </div>
+    </div>
+    <div class="hero-fade"></div>
+
+    <div class="hero-content rv">
+      <h1>Trade BTC, ETH & SOL<br/><span class="accent">In Naira. From Your Wallet.</span></h1>
+      <p class="hero-sub">Go long or short on crypto with up to 5x leverage — all settled in cNGN, the digital Naira. No brokers, no frozen accounts, no hidden fees. You stay in control.</p>
+      <div class="hero-actions">
+        <a href="#waitlist" class="btn-primary">GET EARLY ACCESS</a>
+        <a href="#how-it-works" class="btn-secondary">SEE HOW IT WORKS</a>
+      </div>
+    </div>
+
+    <div class="hero-stats rv" style="transition-delay:0.15s;">
+      <div class="hero-stat"><div class="hero-stat-val">5x</div><div class="hero-stat-label">Max Leverage</div></div>
+      <div class="hero-stat"><div class="hero-stat-val">100%</div><div class="hero-stat-label">Transparent</div></div>
+      <div class="hero-stat"><div class="hero-stat-val">0</div><div class="hero-stat-label">Middlemen</div></div>
+      <div class="hero-stat"><div class="hero-stat-val">3</div><div class="hero-stat-label">Trading Pairs</div></div>
+    </div>
+  </section>
+
+  <!-- TICKER -->
+  <div class="ticker">
+    <div class="ticker-track" id="ticker">
+      <div class="ticker-item"><span class="ticker-pair">BTC/cNGN</span><span class="ticker-price">₦85,200</span><span class="ticker-change ticker-up">+6.42%</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">ETH/cNGN</span><span class="ticker-price">₦5,480</span><span class="ticker-change ticker-down">-2.14%</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">SOL/cNGN</span><span class="ticker-price">₦248</span><span class="ticker-change ticker-up">+11.27%</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">BTC/cNGN</span><span class="ticker-price">Vol: ₦2.4B</span><span class="ticker-change ticker-up">24h</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">ETH/cNGN</span><span class="ticker-price">Vol: ₦1.8B</span><span class="ticker-change ticker-up">24h</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">SOL/cNGN</span><span class="ticker-price">Vol: ₦960M</span><span class="ticker-change ticker-up">24h</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">BTC/cNGN</span><span class="ticker-price">₦85,200</span><span class="ticker-change ticker-up">+6.42%</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">ETH/cNGN</span><span class="ticker-price">₦5,480</span><span class="ticker-change ticker-down">-2.14%</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">SOL/cNGN</span><span class="ticker-price">₦248</span><span class="ticker-change ticker-up">+11.27%</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">BTC/cNGN</span><span class="ticker-price">Vol: ₦2.4B</span><span class="ticker-change ticker-up">24h</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">ETH/cNGN</span><span class="ticker-price">Vol: ₦1.8B</span><span class="ticker-change ticker-up">24h</span></div>
+      <div class="ticker-sep"></div>
+      <div class="ticker-item"><span class="ticker-pair">SOL/cNGN</span><span class="ticker-price">Vol: ₦960M</span><span class="ticker-change ticker-up">24h</span></div>
+    </div>
+  </div>
+
+  <!-- ===== FEATURES ===== -->
+  <div class="divider"></div>
+  <section id="features" style="position:relative;overflow:hidden;">
+    <div class="asset-particles" id="ap-features"></div>
+    <div class="section rv">
+      <div class="section-header">
+        <span class="section-tag">Why Sovereignty</span>
+        <h2 class="section-title">Built for Nigerian Traders.<br/>No Compromises.</h2>
+      </div>
+      <div class="features-grid">
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(0,184,94,0.08);">
+            <svg width="24" height="24" fill="none" stroke="#00b85e" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+          </div>
+          <h3>Trade Top Crypto</h3>
+          <p>Bitcoin, Ethereum, and Solana — trade them all with leverage, directly from your wallet. Everything settled in Naira (cNGN).</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(139,92,246,0.06);">
+            <svg width="24" height="24" fill="none" stroke="#8b5cf6" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <h3>No Middlemen</h3>
+          <p>No broker can freeze your account or manipulate prices. You hold your funds, you make the trades, you keep the profits.</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon" style="background:rgba(56,97,251,0.06);">
+            <svg width="24" height="24" fill="none" stroke="#3861fb" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <h3>Fully Transparent</h3>
+          <p>Every trade, deposit, and withdrawal is publicly verifiable. Nothing hidden, nothing manipulated — see everything for yourself.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SHOWCASE: TRADING ===== -->
+  <section class="showcase-section">
+    <div class="showcase-glow"></div>
+    <div class="showcase-wrap rv">
+      <div class="showcase-layout">
+        <div class="showcase-text">
+          <span class="section-tag">Trading</span>
+          <h2 class="section-title">Trade What Matters</h2>
+          <p class="section-subtitle">Bet on the price of BTC, ETH, and SOL going up or down — with real-time pricing you can trust, and no expiry dates on your positions.</p>
+          <div class="showcase-meta">
+            <div class="showcase-meta-item"><div class="showcase-meta-label">Execution</div><div class="showcase-meta-val">Protected Orders</div></div>
+            <div class="showcase-meta-item"><div class="showcase-meta-label">Settlement</div><div class="showcase-meta-val">100% in Naira</div></div>
+            <div class="showcase-meta-item"><div class="showcase-meta-label">Leverage</div><div class="showcase-meta-val">Up to 5x</div></div>
+            <div class="showcase-meta-item"><div class="showcase-meta-label">Protection</div><div class="showcase-meta-val">Front-Run Proof</div></div>
+          </div>
+        </div>
+        <div class="float-anim">
+          <div class="chart-card">
+            <div class="chart-card-tabs">
+              <button class="chart-card-tab active" onclick="switchChart('btc')" id="sc-btc">BTC/cNGN</button>
+              <button class="chart-card-tab" onclick="switchChart('eth')" id="sc-eth">ETH/cNGN</button>
+              <button class="chart-card-tab" onclick="switchChart('sol')" id="sc-sol">SOL/cNGN</button>
+            </div>
+            <div class="chart-card-body">
+              <img src="assets/chart-mockup.svg" alt="BTC/cNGN" class="visible" id="scc-btc"/>
+              <img src="assets/chart-eth.svg" alt="ETH/cNGN" class="hidden" id="scc-eth"/>
+              <img src="assets/chart-sol.svg" alt="SOL/cNGN" class="hidden" id="scc-sol"/>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== QUOTE ===== -->
+  <div class="divider"></div>
+  <section class="quote-section">
+    <div class="rv">
+      <div class="quote-mark">&ldquo;</div>
+      <p class="quote-text"><em>Global markets</em>, local currency, no permission needed.</p>
+      <div class="quote-attr">The Sovereignty Vision</div>
+    </div>
+  </section>
+  <div class="divider"></div>
+
+  <!-- ===== POWERED BY ===== -->
+  <section class="powered-section">
+    <div class="powered-inner rv">
+      <span class="powered-label">Built On</span>
+      <div class="powered-item"><svg viewBox="0 0 111 111" fill="currentColor"><path d="M54.921 110.034C85.359 110.034 110.034 85.402 110.034 55.017C110.034 24.6319 85.359 0 54.921 0C26.0432 0 2.35281 22.1714 0 50.3923H72.8467V59.6416H0C2.35281 87.8625 26.0432 110.034 54.921 110.034Z"/></svg><span>Base</span></div>
+      <div class="powered-item"><svg viewBox="0 0 24 24" fill="currentColor"><polygon points="12,1 22,6.5 22,17.5 12,23 2,17.5 2,6.5"/></svg><span>Chainlink</span></div>
+      <div class="powered-item"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 2.18l7 3.12v4.7c0 4.83-3.13 9.37-7 10.82-3.87-1.45-7-5.99-7-10.82V6.3l7-3.12z"/></svg><span>OpenZeppelin</span></div>
+      <div class="powered-item"><svg viewBox="0 0 24 24" fill="currentColor"><text x="4" y="18" font-size="16" font-weight="700" font-family="Satoshi,sans-serif">&#8358;</text></svg><span>cNGN</span></div>
+    </div>
+  </section>
+
+  <!-- ===== MID-PAGE CTA ===== -->
+  <div class="divider"></div>
+  <section class="cta-section" style="padding:5rem 2rem;position:relative;overflow:hidden;">
+    <div class="rv" style="max-width:600px;margin:0 auto;">
+      <h2 style="font-size:clamp(1.5rem,3vw,2.25rem);">Ready to trade without a middleman?</h2>
+      <p class="cta-sub" style="margin-bottom:1.5rem;">Join the waitlist and be the first to trade when we launch.</p>
+      <a href="#waitlist" class="btn-primary">GET EARLY ACCESS</a>
+    </div>
+  </section>
+
+  <!-- ===== HOW IT WORKS ===== -->
+  <div class="divider"></div>
+  <section id="how-it-works" style="position:relative;overflow:hidden;">
+    <div class="asset-particles" id="ap-howitworks"></div>
+    <div class="section rv">
+      <div class="section-header">
+        <span class="section-tag">How It Works</span>
+        <h2 class="section-title">Start Trading in Minutes</h2>
+        <p class="section-subtitle">From connecting your wallet to placing your first trade — four simple steps.</p>
+      </div>
+      <div class="steps-grid">
+        <div class="step-item"><div class="step-num">01</div><h3>Connect Wallet</h3><p>Use MetaMask, Rabby, Coinbase Wallet, or any wallet you already have. Your keys, your control.</p></div>
+        <div class="step-item"><div class="step-num">02</div><h3>Deposit cNGN</h3><p>Fund your account with cNGN (digital Naira). Your money stays in a transparent, secure vault — not with us.</p></div>
+        <div class="step-item"><div class="step-num">03</div><h3>Place Your Trade</h3><p>Go long or short on BTC, ETH, or SOL with up to 5x leverage. Your order is protected from price manipulation.</p></div>
+        <div class="step-item"><div class="step-num">04</div><h3>Collect Your Profits</h3><p>Close your position anytime. Profits are sent directly to your wallet in cNGN — instant, no delays.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== ARCHITECTURE ===== -->
+  <section class="visual-section" id="architecture" style="position:relative;">
+    <div class="asset-particles" id="ap-architecture"></div>
+    <div class="vs-glow vs-glow-1"></div>
+    <div class="vs-glow vs-glow-2"></div>
+    <div class="vs-inner rv">
+      <div class="vs-layout">
+        <div>
+          <h2 class="section-title" style="font-size:clamp(2rem,4vw,3rem);">Simple System.<br/>Maximum Security.</h2>
+          <p class="section-subtitle" style="margin-top:1rem;">Three purpose-built components work together to keep your funds safe and your trades fair.</p>
+          <div class="status-pill"><div class="status-dot"></div>All code publicly verified &middot; Open source</div>
+        </div>
+        <div class="vs-cards">
+          <div class="vs-card">
+            <h4>
+              <svg width="18" height="18" fill="none" stroke="#00b85e" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+              Access Manager
+            </h4>
+            <p>Controls who can do what — so only authorized actions happen. Think of it as the security gate for the entire system.</p>
+          </div>
+          <div class="vs-card">
+            <h4>
+              <svg width="18" height="18" fill="none" stroke="#00b85e" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+              cNGN Vault
+            </h4>
+            <p>Where your cNGN is securely held. Your deposit is always accounted for, always withdrawable, always yours.</p>
+          </div>
+          <div class="vs-card">
+            <h4>
+              <svg width="18" height="18" fill="none" stroke="#00b85e" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              Trading Engine
+            </h4>
+            <p>Handles your trades, tracks your positions, and uses real-time price data to settle everything fairly.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== TRANSPARENT SETTLEMENT ===== -->
+  <section class="visual-section" id="security" style="position:relative;">
+    <div class="asset-particles" id="ap-security"></div>
+    <div class="vs-glow vs-glow-1" style="left: auto; right: -100px;"></div>
+    <div class="vs-glow vs-glow-2" style="right: auto; left: -100px;"></div>
+    <div class="vs-inner rv">
+      <div class="vs-layout reverse">
+        <div class="vs-cards">
+          <div class="vs-card">
+            <h4>
+              <svg width="18" height="18" fill="none" stroke="#3861fb" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+              Industry-Standard Security
+            </h4>
+            <p>Built on the same security libraries trusted by the biggest names in crypto — battle-tested and proven safe.</p>
+          </div>
+          <div class="vs-card">
+            <h4>
+              <svg width="18" height="18" fill="none" stroke="#3861fb" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+              Reliable Price Feeds
+            </h4>
+            <p>Prices come from Chainlink — a trusted network that can't be tampered with. The price you see is the real price.</p>
+          </div>
+          <div class="vs-card">
+            <h4>
+              <svg width="18" height="18" fill="none" stroke="#3861fb" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+              Order Protection
+            </h4>
+            <p>Your orders are encrypted before execution — so no one can see your trade and jump ahead of you to profit at your expense.</p>
+          </div>
+        </div>
+        <div>
+          <h2 class="section-title" style="font-size:clamp(2rem,4vw,3rem);">Your Money.<br/>Your Rules.</h2>
+          <p class="section-subtitle" style="margin-top:1rem;">Nobody can freeze your funds, manipulate your prices, or block your withdrawals. Every layer is built for your protection.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== FAQ ===== -->
+  <section class="faq-section" id="faq" style="position:relative;overflow:hidden;">
+    <div class="asset-particles" id="ap-faq"></div>
+    <div class="section rv">
+      <div class="section-header center">
+        <span class="section-tag">FAQ</span>
+        <h2 class="section-title">Frequently Asked Questions</h2>
+      </div>
+      <div class="faq-list">
+        <details class="faq-item"><summary>What is Sovereignty?</summary><div class="faq-body">Sovereignty is a trading platform where you can bet on the price of Bitcoin, Ethereum, and Solana going up or down — all using cNGN (digital Naira) as your currency. No broker, no middleman, you trade directly from your own wallet.</div></details>
+        <details class="faq-item"><summary>What is cNGN?</summary><div class="faq-body">cNGN is a digital version of the Nigerian Naira — 1 cNGN always equals ₦1. Think of it like having Naira in a digital wallet that works on the internet. It's the currency you use to trade on Sovereignty.</div></details>
+        <details class="faq-item"><summary>How is Sovereignty different from a broker?</summary><div class="faq-body">With a broker, they hold your money and can freeze your account anytime. With Sovereignty, your funds stay in your wallet at all times. No one — not even us — can touch your money, block your trades, or manipulate prices.</div></details>
+        <details class="faq-item"><summary>What do I need to start trading?</summary><div class="faq-body">Just a crypto wallet (like MetaMask or Coinbase Wallet) and some cNGN. Connect your wallet, deposit cNGN, and you're ready to trade. That's it.</div></details>
+        <details class="faq-item"><summary>What can I trade?</summary><div class="faq-body">Bitcoin, Ethereum, and Solana — all paired with cNGN. You can go long (bet the price goes up) or short (bet it goes down), with up to 5x leverage to amplify your position.</div></details>
+        <details class="faq-item"><summary>How are my orders protected?</summary><div class="faq-body">When you place a trade, it's encrypted first so nobody can see it and front-run you. Only after your order is locked in does it get revealed and executed. This means no one can jump ahead of your trade to profit at your expense.</div></details>
+        <details class="faq-item"><summary>Do I control my money at all times?</summary><div class="faq-body">Yes, always. Your funds sit in a transparent, verifiable vault — not in someone's bank account. Sovereignty cannot access, freeze, or seize your money. You can withdraw anytime.</div></details>
+        <details class="faq-item"><summary>What if my trade goes badly?</summary><div class="faq-body">If the market moves too far against you and your deposit can no longer cover the loss, your position is closed automatically to prevent further losses. This happens transparently using real-time price data — no manual intervention, no surprises.</div></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== CTA ===== -->
+  <div class="divider"></div>
+  <section class="cta-section" id="waitlist" style="position:relative;overflow:hidden;">
+    <div class="asset-particles" id="ap-cta"></div>
+    <div class="rv">
+      <h2>Trade Crypto in Naira.<br/><span>No Permission Needed.</span></h2>
+      <p class="cta-sub">Sovereignty is launching soon. Join the waitlist and be among the first to trade — no broker, no middleman, just you and the market.</p>
+      <form onsubmit="handleWl(event)" class="wl-form">
+        <input type="email" required placeholder="Enter your email" aria-label="Email address"/>
+        <button type="submit" class="btn-primary">JOIN WAITLIST</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ===== FOOTER ===== -->
+  <footer class="footer">
+    <div class="footer-inner">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <div class="nav-logo">
+            <svg viewBox="0 0 512 512" width="24" height="24" fill="none"><g transform="translate(256,256)"><path d="M-90,-160 L90,-160 L110,-55 L110,55 L90,160 L-90,160 L-110,55 L-110,-55Z" fill="#00b85e"/><path d="M-65,-125 L65,-125 L65,-85 L-65,-85Z" fill="#ffffff"/><path d="M-65,-85 L-25,-85 L-25,-20 L-65,-20Z" fill="#ffffff"/><path d="M-65,-20 L65,-20 L65,20 L-65,20Z" fill="#ffffff"/><path d="M25,20 L65,20 L65,85 L25,85Z" fill="#ffffff"/><path d="M-65,85 L65,85 L65,125 L-65,125Z" fill="#ffffff"/></g></svg>
+            <span>Sovereignty</span>
+          </div>
+          <p>Global financial freedom, masked by local simplicity, powered by the blockchain.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <a href="#features">Features</a>
+          <a href="#how-it-works">How It Works</a>
+          <a href="#waitlist">Early Access</a>
+        </div>
+        <div class="footer-col">
+          <h4>Developers</h4>
+          <a href="https://github.com/yeahChibyke/sovereignty" target="_blank" rel="noopener">GitHub</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#security">Security</a>
+        </div>
+        <div class="footer-col">
+          <h4>Community</h4>
+          <a href="#">Twitter / X</a>
+          <a href="#">Discord</a>
+          <a href="#">Telegram</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>&copy; 2026 Sovereignty Protocol. All rights reserved.</span>
+        <div class="footer-social">
+          <a href="#" aria-label="Twitter"><svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
+          <a href="#" aria-label="Discord"><svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M20.317 4.37a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03z"/></svg></a>
+          <a href="#" aria-label="Telegram"><svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M11.944 0A12 12 0 000 12a12 12 0 0012 12 12 12 0 0012-12A12 12 0 0012 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 01.171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg></a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    function toggleMob() { document.getElementById('mob-menu').classList.toggle('open'); }
+
+    // Nav scroll effect
+    (function() {
+      var nav = document.querySelector('.nav');
+      function onScroll() {
+        if (window.scrollY > 40) nav.classList.add('scrolled');
+        else nav.classList.remove('scrolled');
+      }
+      window.addEventListener('scroll', onScroll, { passive: true });
+      onScroll();
+    })();
+
+    function handleWl(e) {
+      e.preventDefault();
+      var f = e.target, inp = f.querySelector('input[type="email"]'), btn = f.querySelector('button');
+      if (!inp.value.trim()) return;
+      btn.textContent = 'JOINED!'; btn.disabled = true; inp.disabled = true; inp.value = ''; inp.placeholder = "You're on the list!";
+      setTimeout(function() { btn.textContent = 'JOIN WAITLIST'; btn.disabled = false; inp.disabled = false; inp.placeholder = 'Enter your email'; }, 3000);
+    }
+
+    function switchChart(pair) {
+      ['btc', 'eth', 'sol'].forEach(function(p) {
+        var img = document.getElementById('scc-' + p);
+        var tab = document.getElementById('sc-' + p);
+        if (p === pair) { img.className = 'visible'; tab.classList.add('active'); }
+        else { img.className = 'hidden'; tab.classList.remove('active'); }
+      });
+    }
+
+    // Scroll reveal
+    var observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) { if (entry.isIntersecting) entry.target.classList.add('visible'); });
+    }, { threshold: 0.06 });
+    document.querySelectorAll('.rv').forEach(function(el) { observer.observe(el); });
+
+    // Hide nav CTA on mobile
+    (function() {
+      var cta = document.getElementById('nav-cta');
+      function update() { cta.style.display = window.innerWidth >= 768 ? 'inline-flex' : 'none'; }
+      update(); window.addEventListener('resize', update);
+    })();
+
+    // Generate star field — subtle interstellar particles across entire page
+    (function() {
+      var container = document.getElementById('starfield');
+      var count = 60;
+      var pageH = Math.max(document.body.scrollHeight, 5000);
+      for (var i = 0; i < count; i++) {
+        var star = document.createElement('div');
+        star.className = 'star' + (Math.random() > 0.7 ? ' bright' : '');
+        var size = Math.random() * 2.5 + 1;
+        star.style.cssText = 'width:' + size + 'px;height:' + size + 'px;top:' + (Math.random() * pageH) + 'px;left:' + (Math.random() * 100) + '%;animation-delay:' + (Math.random() * 6) + 's;animation-duration:' + (3 + Math.random() * 4) + 's;';
+        container.appendChild(star);
+      }
+    })();
+
+    // Floating asset logos in sections
+    (function() {
+      // Recognizable crypto symbols: BTC (₿ coin), ETH (diamond), SOL (sun burst), cNGN (₦ with circle)
+      var assetSVGs = {
+        btc: '<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2.5" fill="none"/><text x="32" y="42" text-anchor="middle" font-size="30" font-weight="700" fill="currentColor" font-family="Satoshi,sans-serif">₿</text></svg>',
+        eth: '<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M32 4L12 32l20 12 20-12L32 4z" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linejoin="round"/><path d="M12 36l20 24 20-24-20 12L12 36z" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linejoin="round"/></svg>',
+        sol: '<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="32" cy="32" r="12" stroke="currentColor" stroke-width="2.5" fill="none"/><line x1="32" y1="4" x2="32" y2="16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="32" y1="48" x2="32" y2="60" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="4" y1="32" x2="16" y2="32" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="48" y1="32" x2="60" y2="32" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="12.2" y1="12.2" x2="20.4" y2="20.4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="43.6" y1="43.6" x2="51.8" y2="51.8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="12.2" y1="51.8" x2="20.4" y2="43.6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><line x1="43.6" y1="20.4" x2="51.8" y2="12.2" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>',
+        cngn: '<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="32" cy="32" r="28" stroke="currentColor" stroke-width="2.5" fill="none"/><text x="32" y="43" text-anchor="middle" font-size="32" font-weight="700" fill="currentColor" font-family="Satoshi,sans-serif">₦</text></svg>'
+      };
+      var assetKeys = ['btc', 'eth', 'sol', 'cngn'];
+      var colors = [
+        'rgba(247,147,26,0.55)',   /* BTC orange */
+        'rgba(98,126,234,0.5)',    /* ETH blue-purple */
+        'rgba(0,255,163,0.5)',     /* SOL green-cyan */
+        'rgba(0,184,94,0.55)'      /* cNGN green */
+      ];
+      var anims = ['swoosh-lr', 'swoosh-rl', 'float-drift'];
+
+      var containers = [
+        'ap-features', 'ap-howitworks', 'ap-architecture',
+        'ap-security', 'ap-faq', 'ap-cta'
+      ];
+
+      containers.forEach(function(id) {
+        var container = document.getElementById(id);
+        if (!container) return;
+        // 7-10 particles per section
+        var count = 7 + Math.floor(Math.random() * 4);
+        for (var i = 0; i < count; i++) {
+          var el = document.createElement('div');
+          var assetIdx = i % 4;
+          var anim = anims[Math.floor(Math.random() * anims.length)];
+          var size = 36 + Math.floor(Math.random() * 32); // 36-68px
+          var topPct = 5 + Math.random() * 80;
+          var leftPct = 3 + Math.random() * 90;
+          var dur = 8 + Math.random() * 10; // 8-18s (faster)
+          var delay = Math.random() * 8;
+          var peakOp = 0.25 + Math.random() * 0.2; // 0.25-0.45
+          var rot = Math.floor(Math.random() * 360);
+          var startY = -30 + Math.random() * 60;
+          var endY = -20 + Math.random() * 40;
+          var sc = 0.8 + Math.random() * 0.6;
+
+          el.className = 'asset-particle ' + anim;
+          el.style.cssText =
+            'width:' + size + 'px;height:' + size + 'px;' +
+            'top:' + topPct + '%;left:' + leftPct + '%;' +
+            'color:' + colors[assetIdx] + ';' +
+            '--dur:' + dur + 's;--delay:' + delay + 's;' +
+            '--peak-op:' + peakOp + ';--rot:' + rot + 'deg;' +
+            '--startY:' + startY + 'px;--endY:' + endY + 'px;' +
+            '--sc:' + sc + ';';
+          el.innerHTML = assetSVGs[assetKeys[assetIdx]];
+          container.appendChild(el);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
