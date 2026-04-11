@@ -9,15 +9,41 @@ Wrapped BTC (WBTC) on BASE = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"  .. 8 
 Wrapped ETH (WETH) on BASE = "0x4200000000000000000000000000000000000006"   .. 18 decimals
 Wrapped SOL (WSOL) on BASE = "0x311935Cd80B76769bF2ecC9D8Ab7635b2139cf82"   .. 9 decimals
 
-Price feeds from Chainlink:
-BTC/USD on BASE = "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F"
-ETH/USD on BASE = "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"
-SOL/USD on BASE = "0x975043adBb80fc32276CbF9Bbcfd4A601a12462D"
-NGN/USD on BASE = "0xdfbb5Cbc88E382de007bfe6CE99C388176ED80aD"
+Pyth address:
+BASE = "0x8250f4aF4B972684F7b336503E2D6dFeDeB1487a"
 
-Heartbeat from Chainlink:
-NGN/USD on BASE = 3600s
-BTC/USD on BASE = 1200s
-ETH/USD on BASE = 1200s
-SOL/USD on BASE = 86400s
+Pyth Feed IDs 
+
+Crypto:
+BTC/USD = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"  Exponent: -8
+ETH/USD = "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"  Exponent: -8
+SOL/USD = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"  Exponent: -8
+
+Commodities:
+BRENT UKOILSPOT/USD = "0x27f0d5e09a830083e5491795cac9ca521399c8f7fd56240d09484b14e614d57a"  Exponent: -5
+
+Metal:
+Silver XAG/USD = "0xf2fb02c32b055c805e7238d628e5e9dadef274376114eb1f012337cabe93871e"  Exponent: -5
+Gold XAU/USD = "0x765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2"  Exponent: -3
+
+Equity:
+Nvidia NVDA/USD = "0xb1073854ed24cbc755dc527418f52b7d271f6cc967bbf8d8129112b18860a593"  Exponent: -5
+Tesla TSLA/USD = "0x16dad506d7db8da01c87581c87ca897a012a153557d4d578c3b9c9e1bc0632f1"  Exponent: -5
+Apple AAPL/USD = "0x49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688"  Exponent: -5
+
+Forex:
+Euro EUR/USD = "0xa995d00bb36a63cef7fd2c287dc105fc8f3d93779f062f09551b0af3e81ec30b"  Exponent: -5
+British Pound GBP/USD = "0x84c2dde9633d93d1bcad84e7dc41c9d56578b7ec52fabedc1f335d673df0a7c1"  Exponent: -5
+
+NGN Triangulation Feed (required for all markets):
+USD/NGN = "0x2f1601cdfed62c03d39fce4720f5d53e8517af244915fbd24ce8175bb25ab318"  Exponent: -5  (FX.USD/NGN — US Dollar / Nigerian Naira)
+EUR/NGN = "0xda57c298043bde9adf2d7760bde2f5da7fae58518c9e641259c40b12e70463bf"  Exponent: -5  (optional, future use)
+GBP/NGN = "0x3c486f6cb5ea7d068117c328ba233f6153b69cee472260366972b50591558de6"  Exponent: -5  (optional, future use)
+
+Leverage as at deployment (open to changes because contracts are upgradeable.. yes/no?)
+Crypto: 5x
+Metal: 3x
+Equity: 3x
+Forex: 3x
+
 

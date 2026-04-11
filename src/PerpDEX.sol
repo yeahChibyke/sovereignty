@@ -6,16 +6,65 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {AccessManaged} from "@openzeppelin/contracts/access/manager/AccessManaged.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {AggregatorV3Interface} from "chainlink-evm/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {
     AutomationCompatibleInterface
 } from "chainlink-evm/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
-import {cNGNVault} from "./cNGNVault.sol";
+import {AggregatorV3Interface} from "chainlink-evm/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
+import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
+import {PythUtils} from "@pythnetwork/pyth-sdk-solidity/PythUtils.sol";
+import {MarketVault} from "./MarketVault.sol";
 
 /// @title PerpDEX
-/// @notice Perpetual futures trading engine for Asset/cNGN markets.
-///         Uses Chainlink triangulation (Asset/USD ÷ NGN/USD), continuous funding,
-///         commit-reveal order flow, Chainlink Automation liquidations, and public liquidation with bounties.
+/// @author Sovereignty Protocol
+/// @notice Multi-market perpetual futures trading engine for Asset/cNGN markets on Base.
+///
+/// @dev Core architecture & feature summary:
+///
+///      ─── Market model ───
+///      Each tradeable asset (ETH, BTC, SOL, etc.) is a separate "market" identified by a
+///      `bytes32 marketId` (e.g. `keccak256("ETH-PERP")`). Markets are added/removed by
+///      the admin via `SovereigntyAccessManager`. Each market has:
+///        - its own `MarketVault` (isolated ERC4626 liquidity pool),
+///        - its own Pyth Asset/USD price feed,
+///        - independent leverage/margin/OI parameters.
+///      Risk is fully isolated: LP deposits in the ETH vault cannot be drained by losses
+///      in the BTC market. This follows the GMX V2 / Synthetix V3 isolated-pool pattern.
+///
+///      ─── Oracle triangulation ───
+///      All positions and collateral are denominated in cNGN (a Naira stablecoin). To price
+///      an asset in cNGN, the contract performs a two-hop conversion:
+///        1. Asset/USD  — fetched from a per-market Pyth price feed.
+///        2. USD/NGN    — derived by inverting a Chainlink NGN/USD feed on Base.
+///        → Asset/cNGN = Asset/USD × USD/NGN
+///      Both legs include staleness and sanity checks (confidence ratio for Pyth,
+///      updatedAt + answer > 0 for Chainlink).
+///
+///      ─── Order flow (commit-reveal) ───
+///      Trade execution uses a two-step commit-reveal pattern to prevent front-running:
+///        1. `requestTrade()` — trader commits a hash of their order parameters.
+///        2. `executeTrade()` — trader reveals parameters after a block delay; the hash is
+///           verified, and the position is opened at the current mark price.
+///      The delay window is [MIN_BLOCK_DELAY, MAX_BLOCK_DELAY] blocks.
+///
+///      ─── Funding rate ───
+///      A continuous funding rate incentivizes OI balance. Longs pay shorts (or vice versa)
+///      based on the imbalance ratio: `imbalance = (longOI − shortOI) / totalOI`. The
+///      cumulative `fundingIndex` is updated on every trade/close/liquidation and applied
+///      as a PnL adjustment at settlement.
+///
+///      ─── Liquidations ───
+///      A position is liquidatable when its equity (collateral + unrealized PnL − funding)
+///      falls below `maintenanceMarginRatio × positionSize`. Two liquidation paths exist:
+///        a) Public liquidation — anyone calls `liquidate()` and earns a 1% bounty.
+///        b) Automated liquidation — Chainlink Automation nodes call `checkUpkeep()` /
+///           `performUpkeep()` via a registered forwarder. Batch-processes up to 10
+///           liquidations per call.
+///
+///      ─── Access control ───
+///      Admin functions (`addMarket`, `disableMarket`, `pause`, etc.) use the `restricted`
+///      modifier from OpenZeppelin's `AccessManaged`, delegating authorization to
+///      `SovereigntyAccessManager` where role-to-function mappings are configured.
 contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatibleInterface {
     using SafeERC20 for IERC20;
 
@@ -23,304 +72,653 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
                               CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice 1e18 — internal precision for all fixed-point math.
+    /// @notice 1e18 — universal fixed-point precision used throughout the contract.
+    /// @dev All position sizes, mark prices, funding indices, and internal calculations
+    ///      operate at 18-decimal precision. Token amounts (cNGN, 6 dec) are scaled up
+    ///      to PRECISION for math and scaled back down for settlement.
     uint256 public constant PRECISION = 1e18;
 
-    /// @notice 1e8 — Chainlink answer precision.
-    uint256 public constant CHAINLINK_PRECISION = 1e8;
-
-    /// @notice Maximum allowed leverage (5x).
-    uint256 public constant MAX_LEVERAGE = 5;
-
-    /// @notice Maintenance margin ratio (2%, in PRECISION). Below this → liquidatable.
-    uint256 public constant MAINTENANCE_MARGIN_RATIO = 2e16; // 2%
-
-    /// @notice Liquidation bounty paid to the caller (1% of remaining collateral, in PRECISION).
+    /// @notice Fraction of remaining equity paid to the liquidator as a bounty (1%).
+    /// @dev Expressed in PRECISION: 1e16 / 1e18 = 0.01 = 1%.
+    ///      Applied to the trader's remaining equity (if positive) at liquidation time.
+    ///      For automated (forwarder) liquidations, the bounty stays in the vault as
+    ///      protocol yield rather than being paid to the Chainlink node.
     uint256 public constant LIQUIDATION_BOUNTY_RATIO = 1e16; // 1%
 
-    /// @notice Minimum blocks between commit and execute (commit-reveal delay).
+    /// @notice Minimum number of blocks a trader must wait after committing before executing.
+    /// @dev On Base (~2s block time), 1 block ≈ 2 seconds. Prevents same-block oracle
+    ///      manipulation: the trader cannot know the execution price at commit time.
     uint256 public constant MIN_BLOCK_DELAY = 1;
 
-    /// @notice Maximum blocks a committed order stays valid.
+    /// @notice Maximum number of blocks after commit during which the order is still valid.
+    /// @dev After `commitBlock + MAX_BLOCK_DELAY`, the order expires and must be re-committed.
+    ///      On Base, 20 blocks ≈ 40 seconds — long enough for normal execution, short enough
+    ///      to prevent stale-order abuse.
     uint256 public constant MAX_BLOCK_DELAY = 20;
 
-    /// @notice Funding rate scaling factor per second (~0.000001% per second at max imbalance).
-    /// Targets ~0.09% per day at full imbalance, comparable to DeFi perpetual standards.
+    /// @notice Per-second funding rate scaling factor.
+    /// @dev At maximum imbalance (100% long or 100% short), the funding rate accrues at
+    ///      `FUNDING_RATE_PER_SECOND / PRECISION` per second ≈ 0.000001% / sec ≈ 0.0036% / hr.
+    ///      The actual rate is proportional to the OI imbalance ratio.
     uint256 public constant FUNDING_RATE_PER_SECOND = 1e10;
 
-    /// @notice Maximum number of liquidations per performUpkeep batch.
+    /// @notice Maximum number of liquidations processed in a single `performUpkeep` call.
+    /// @dev Caps gas usage per Automation callback. If more positions are liquidatable, they
+    ///      will be picked up in subsequent Automation rounds.
     uint256 public constant MAX_LIQUIDATION_BATCH = 10;
+
+    /// @notice Target decimal precision for Pyth price normalization.
+    /// @dev Pyth prices arrive with a variable `expo` (e.g. -8 for 8 decimals). PythUtils
+    ///      normalizes them to `PYTH_TARGET_DECIMALS` (18) so they align with PRECISION.
+    uint8 public constant PYTH_TARGET_DECIMALS = 18;
+
+    /// @notice Maximum acceptable confidence-to-price ratio (2.5%).
+    /// @dev Pyth prices include a 95% confidence interval. If `conf / price > 2.5%`,
+    ///      the price is deemed too uncertain and the transaction reverts with
+    ///      `PriceConfidenceTooWide`. This guards against trading on noisy or illiquid feeds.
+    ///      Expressed in PRECISION: 25e15 / 1e18 = 0.025 = 2.5%.
+    uint256 public constant MAX_CONFIDENCE_RATIO = 25e15; // 2.5%
 
     /*//////////////////////////////////////////////////////////////
                                 ENUMS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Direction of a perpetual futures position.
     enum Side {
-        Long,
-        Short
+        Long, //  Profits when asset price rises
+        Short // Profits when asset price falls
+    }
+
+    /// @notice Category of a listed market. Used for frontend classification and
+    ///         potential future per-category parameter defaults.
+    enum MarketType {
+        Crypto, //   e.g. ETH, BTC, SOL
+        Commodity, // e.g. OIL, WHEAT
+        Equity, //    e.g. AAPL, TSLA
+        FX, //        e.g. EUR/USD
+        Metal //      e.g. XAU (gold)
     }
 
     /*//////////////////////////////////////////////////////////////
                                STRUCTS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Represents a single trader's open position in a specific market.
+    /// @dev Stored in `positions[marketId][trader]`. A zero `size` means no position.
     struct Position {
-        uint256 size; // Position size in cNGN value (PRECISION scaled)
-        uint256 collateral; // Collateral in cNGN (raw token units, 6 decimals)
-        uint256 averagePrice; // Entry price (PRECISION scaled, in cNGN)
-        int256 entryFundingIndex; // Funding index snapshot at entry
-        Side side;
+        uint256 size; //              Notional position size in cNGN (PRECISION scaled, 18 dec)
+        uint256 collateral; //        Margin collateral in cNGN (raw token units, 6 dec)
+        uint256 averagePrice; //      Weighted average entry price in cNGN (PRECISION scaled)
+        int256 entryFundingIndex; //  Snapshot of `marketOI.fundingIndex` at position open
+        Side side; //                 Long or Short
     }
 
-    struct AssetConfig {
-        AggregatorV3Interface priceFeed; // Asset/USD Chainlink feed
-        uint256 maxHeartbeat; // Max acceptable staleness (seconds)
-        bool enabled;
+    /// @notice Configuration parameters for a single market.
+    /// @dev Stored in `marketConfigs[marketId]`. Set at `addMarket()` and mutable via
+    ///      `updateMarketParams()` (except `pythFeedId`, `marketType`, and `vault`).
+    struct MarketConfig {
+        bytes32 pythFeedId; //             Pyth price feed ID for Asset/USD (immutable per market)
+        uint256 maxStaleness; //           Max acceptable Pyth price age in seconds
+        uint256 maxLeverage; //            Max leverage multiplier (e.g. 10 = 10× leverage)
+        uint256 maintenanceMarginRatio; // Liquidation threshold (PRECISION: 2e16 = 2%)
+        uint256 maxOIMultiplier; //        Max total OI as multiple of vault TVL (PRECISION: 5e18 = 5×)
+        MarketType marketType; //          Asset class for this market
+        MarketVault vault; //              Isolated ERC4626 vault for this market's liquidity
+        bool enabled; //                   False = no new positions; existing ones can still close
     }
 
+    /// @notice A pending commit-reveal order. One per trader at a time.
+    /// @dev The trader commits a hash, then reveals parameters after a delay.
     struct CommittedOrder {
-        bytes32 orderHash;
-        uint256 commitBlock;
+        bytes32 orderHash; //  keccak256(abi.encode(trader, marketId, side, collateral, leverage, salt))
+        uint256 commitBlock; // Block number at which the order was committed
     }
 
+    /// @notice Aggregate open interest (OI) state for a single market.
+    /// @dev Stored in `marketOI[marketId]`. Updated on every open/close/liquidation.
+    ///      Weighted average prices enable efficient aggregate unrealized PnL calculation
+    ///      without iterating over individual positions.
     struct MarketOI {
-        uint256 longOI; // Total long open interest (PRECISION scaled cNGN value)
-        uint256 shortOI; // Total short open interest (PRECISION scaled cNGN value)
-        uint256 avgLongPrice; // Weighted average entry price for all longs (PRECISION)
-        uint256 avgShortPrice; // Weighted average entry price for all shorts (PRECISION)
-        int256 fundingIndex; // Cumulative funding index (PRECISION scaled)
-        uint256 lastFundingUpdate; // timestamp of last funding update
+        uint256 longOI; //          Total long notional (PRECISION scaled cNGN value)
+        uint256 shortOI; //         Total short notional (PRECISION scaled cNGN value)
+        uint256 avgLongPrice; //    Volume-weighted average entry price of all longs (PRECISION)
+        uint256 avgShortPrice; //   Volume-weighted average entry price of all shorts (PRECISION)
+        int256 fundingIndex; //     Cumulative per-unit funding (PRECISION scaled, accrues over time)
+        uint256 lastFundingUpdate; // Timestamp of the last funding rate update
+    }
+
+    /// @notice Comprehensive read-only market snapshot returned by `getMarketInfo()`.
+    /// @dev Designed for front-ends and LPs to get all relevant market data in a single
+    ///      RPC call instead of requiring 6+ separate getter invocations.
+    struct MarketInfo {
+        // ── Configuration ──
+        bytes32 marketId; //              The unique market identifier
+        MarketType marketType; //         Asset class (Crypto, Commodity, etc.)
+        bool enabled; //                  Whether new positions can be opened
+        uint256 maxLeverage; //           Maximum leverage multiplier
+        uint256 maintenanceMarginRatio; // Liquidation threshold (PRECISION)
+        uint256 maxOIMultiplier; //       OI cap relative to vault TVL (PRECISION)
+        address vault; //                 Address of the market's isolated ERC4626 vault
+        // ── Live pricing (all 18 decimals) ──
+        uint256 markPriceCngn; //         Asset price in cNGN (Asset/USD × USD/NGN)
+        uint256 assetUsdPrice; //         Raw Asset/USD from Pyth
+        uint256 usdNgnRate; //            How many NGN per 1 USD (from Chainlink, inverted)
+        // ── Open interest (PRECISION scaled) ──
+        uint256 longOI; //                Total long notional value
+        uint256 shortOI; //               Total short notional value
+        int256 fundingIndex; //           Cumulative per-unit funding index
+        // ── Vault & liquidity (token precision, 6 dec) ──
+        uint256 vaultTVL; //              LP-available assets in the vault
+        uint256 collateralHeld; //        Trader collateral held in the vault
+        int256 unrealizedPnL; //          Net unrealized trader PnL (+ = traders winning)
+        // ── Active traders ──
+        uint256 openTraderCount; //       Number of addresses with open positions
     }
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice The cNGN stablecoin used as collateral and quote currency for all markets.
+    /// @dev 6-decimal ERC20. On Base: `0x46C85152bFe9f96829aA94755D9f915F9B10EF5F`.
     IERC20 public immutable cNGN;
-    cNGNVault public immutable vault;
 
-    /// @notice NGN/USD Chainlink feed (shared across all markets).
-    AggregatorV3Interface public ngnUsdFeed;
-    uint256 public ngnUsdMaxHeartbeat;
+    /// @notice Pyth Network oracle contract used for all Asset/USD price feeds.
+    /// @dev Callers must push fresh price updates via `updatePythPrices()` before trading.
+    IPyth public immutable pyth;
 
-    /// @notice asset address => config (feeds, heartbeats).
-    mapping(address => AssetConfig) public assetConfigs;
+    /// @notice Chainlink price feed that reports NGN/USD (e.g. 0.000735 = 1 NGN in USD).
+    /// @dev Inverted in `_getUsdNgnRate()` to produce USD/NGN (e.g. ~1,360 NGN per USD).
+    ///      Mutable via `setUsdNgnFeed()` in case the feed address changes.
+    AggregatorV3Interface public ngnUsdChainlinkFeed;
 
-    /// @notice List of supported asset addresses.
-    address[] public supportedAssets;
+    /// @notice Maximum acceptable age (in seconds) for the Chainlink NGN/USD price.
+    /// @dev If `block.timestamp − updatedAt > usdNgnMaxStaleness`, `_getUsdNgnRate()` reverts.
+    uint256 public usdNgnMaxStaleness;
 
-    /// @notice asset => user => Position
-    mapping(address => mapping(address => Position)) public positions;
+    /// @notice Per-market configuration. Key: `marketId` (e.g. `keccak256("ETH-PERP")`).
+    mapping(bytes32 => MarketConfig) public marketConfigs;
 
-    /// @notice asset => MarketOI
-    mapping(address => MarketOI) public marketOI;
+    /// @notice Ordered list of all market IDs ever added. Used for iteration (e.g. Automation).
+    /// @dev Markets are appended at `addMarket()` and never removed, even if disabled.
+    bytes32[] public marketIds;
 
-    /// @notice user => CommittedOrder (one pending order per user)
+    /// @notice Individual trader positions per market. Key: `marketId → trader address`.
+    mapping(bytes32 => mapping(address => Position)) public positions;
+
+    /// @notice Aggregate open interest state per market.
+    mapping(bytes32 => MarketOI) public marketOI;
+
+    /// @notice Pending commit-reveal orders per trader. Only one order at a time per address.
     mapping(address => CommittedOrder) public committedOrders;
 
-    /// @notice Total trader collateral currently held by the vault (token precision, 6 dec).
-    uint256 public totalCollateralHeld;
+    /// @notice Total cNGN collateral deposited by traders for a given market.
+    /// @dev Token precision (6 dec). Tracked separately so `MarketVault.totalAssets()` can
+    ///      exclude it from LP-available assets — collateral belongs to traders, not LPs.
+    mapping(bytes32 => uint256) public marketCollateralHeld;
 
-    /// @notice Chainlink Automation forwarder address (set after upkeep registration).
+    /// @notice Address of the registered Chainlink Automation forwarder.
+    /// @dev Only this address may call `performUpkeep()`. Set after Automation upkeep
+    ///      registration via `setForwarder()`. Zero address means Automation is not active.
     address public liquidationForwarder;
 
-    /// @notice asset => list of traders with open positions.
-    mapping(address => address[]) public tradersPerAsset;
+    /// @notice List of traders with open positions in each market.
+    /// @dev Used by `checkUpkeep()` to iterate and discover liquidatable positions.
+    ///      Maintained by `_addTrader()` and `_removeTrader()` (swap-and-pop pattern).
+    mapping(bytes32 => address[]) public tradersPerMarket;
 
-    /// @notice asset => trader => index+1 in tradersPerAsset (0 = not present).
-    mapping(address => mapping(address => uint256)) internal _traderIndex;
+    /// @notice Reverse index for `tradersPerMarket`: maps `(marketId, trader) → arrayIndex + 1`.
+    /// @dev A value of 0 means the trader has no open position in that market.
+    ///      Offset by +1 so zero distinguishes "absent" from "index 0".
+    mapping(bytes32 => mapping(address => uint256)) internal _traderIndex;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event AssetConfigured(address indexed asset, address priceFeed, uint256 maxHeartbeat);
-    event NgnFeedConfigured(address priceFeed, uint256 maxHeartbeat);
+    /// @notice Emitted when a new market is listed on the protocol.
+    event MarketAdded(
+        bytes32 indexed marketId,
+        bytes32 pythFeedId,
+        uint256 maxLeverage,
+        uint256 maintenanceMarginRatio,
+        address vault,
+        MarketType marketType
+    );
+
+    /// @notice Emitted when a market is disabled (no new positions can be opened).
+    event MarketDisabled(bytes32 indexed marketId);
+
+    /// @notice Emitted when a market's leverage/margin parameters are updated.
+    event MarketUpdated(bytes32 indexed marketId, uint256 maxLeverage, uint256 maintenanceMarginRatio);
+
+    /// @notice Emitted when the NGN/USD Chainlink feed is set or changed.
+    event UsdNgnFeedConfigured(address feed, uint256 maxStaleness);
+
+    /// @notice Emitted when a trader commits an order hash (step 1 of commit-reveal).
     event TradeCommitted(address indexed trader, bytes32 orderHash, uint256 commitBlock);
+
+    /// @notice Emitted when a position is successfully opened (step 2 of commit-reveal).
     event PositionOpened(
-        address indexed trader, address indexed asset, Side side, uint256 size, uint256 collateral, uint256 price
+        address indexed trader, bytes32 indexed marketId, Side side, uint256 size, uint256 collateral, uint256 price
     );
-    event PositionClosed(address indexed trader, address indexed asset, int256 realisedPnL, uint256 price);
+
+    /// @notice Emitted when a trader voluntarily closes their position.
+    event PositionClosed(address indexed trader, bytes32 indexed marketId, int256 realisedPnL, uint256 price);
+
+    /// @notice Emitted when a position is liquidated (public or automated).
     event PositionLiquidated(
-        address indexed trader, address indexed asset, address indexed liquidator, uint256 bounty, uint256 price
+        address indexed trader, bytes32 indexed marketId, address indexed liquidator, uint256 bounty, uint256 price
     );
-    event FundingUpdated(address indexed asset, int256 newFundingIndex);
-    event CollateralAdded(address indexed trader, address indexed asset, uint256 amount);
-    event CollateralRemoved(address indexed trader, address indexed asset, uint256 amount);
+
+    /// @notice Emitted after the funding index is updated for a market.
+    event FundingUpdated(bytes32 indexed marketId, int256 newFundingIndex);
+
+    /// @notice Emitted when a trader adds collateral to their position.
+    event CollateralAdded(address indexed trader, bytes32 indexed marketId, uint256 amount);
+
+    /// @notice Emitted when a trader withdraws collateral from their position.
+    event CollateralRemoved(address indexed trader, bytes32 indexed marketId, uint256 amount);
+
+    /// @notice Emitted when the Chainlink Automation forwarder address is set.
     event ForwarderSet(address indexed forwarder);
-    event AutomatedLiquidation(address indexed trader, address indexed asset, uint256 yieldCaptured);
+
+    /// @notice Emitted during an automated liquidation executed by the forwarder.
+    /// @param yieldCaptured The bounty amount retained by the protocol (stays in vault).
+    event AutomatedLiquidation(address indexed trader, bytes32 indexed marketId, uint256 yieldCaptured);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error AssetNotEnabled();
-    error StalePrice(address feed, uint256 updatedAt, uint256 maxHeartbeat);
-    error InvalidPrice();
-    error ExceedsMaxLeverage();
-    error PositionAlreadyOpen();
-    error NoOpenPosition();
-    error NotLiquidatable();
-    error ZeroAmount();
-    error NoCommittedOrder();
-    error TooEarlyToExecute();
-    error OrderExpired();
-    error OrderHashMismatch();
-    error InvalidSide();
-    error InsufficientEquity();
-    error ExceedsLeverageAfterRemoval();
-    error OnlyForwarder();
+    error MarketNotEnabled(); //            Market is disabled or does not exist
+    error MarketAlreadyExists(); //         Duplicate marketId on addMarket
+    error InvalidPrice(); //                Oracle returned price ≤ 0
+    error PriceConfidenceTooWide(); //      Pyth confidence / price > MAX_CONFIDENCE_RATIO
+    error ExceedsMaxLeverage(); //          Requested leverage > market's maxLeverage
+    error PositionAlreadyOpen(); //         Trader already has a position in this market
+    error NoOpenPosition(); //              No position to close/liquidate/modify
+    error NotLiquidatable(); //             Position equity is above maintenance margin
+    error ZeroAmount(); //                  Collateral or size is zero
+    error NoCommittedOrder(); //            executeTrade called without prior requestTrade
+    error TooEarlyToExecute(); //           Block delay not yet satisfied
+    error OrderExpired(); //                Beyond MAX_BLOCK_DELAY since commit
+    error OrderHashMismatch(); //           Revealed params don't match committed hash
+    error InsufficientEquity(); //          Remaining equity ≤ 0 after collateral removal
+    error ExceedsLeverageAfterRemoval(); // Post-removal leverage exceeds maxLeverage
+    error OnlyForwarder(); //               performUpkeep caller is not the registered forwarder
+    error ExceedsMaxOI(); //                New position would breach the OI cap
+    error ZeroAddress(); //                 Address parameter is address(0)
+    error InvalidParameters(); //           One or more config values are zero
+    error StaleChainlinkPrice(); //         Chainlink price is older than usdNgnMaxStaleness
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _cNGN, address _vault, address _ngnUsdFeed, uint256 _ngnUsdMaxHeartbeat, address _accessManager)
-        AccessManaged(_accessManager)
-    {
+    /// @notice Deploys the PerpDEX trading engine.
+    /// @dev After deployment, the admin must:
+    ///      1. Call `addMarket()` (via SAM) to list at least one market.
+    ///      2. Call `setForwarder()` after registering a Chainlink Automation upkeep.
+    ///      3. Configure role→function mappings on the `SovereigntyAccessManager`.
+    /// @param _cNGN                  Address of the cNGN ERC20 token (6 decimals).
+    /// @param _pyth                  Address of the Pyth oracle contract on Base.
+    /// @param _ngnUsdChainlinkFeed   Address of the Chainlink NGN/USD price feed on Base.
+    /// @param _usdNgnMaxStaleness    Maximum acceptable age (seconds) for the Chainlink price.
+    /// @param _accessManager         Address of the SovereigntyAccessManager (UUPS proxy).
+    constructor(
+        address _cNGN,
+        address _pyth,
+        address _ngnUsdChainlinkFeed,
+        uint256 _usdNgnMaxStaleness,
+        address _accessManager
+    ) AccessManaged(_accessManager) {
         cNGN = IERC20(_cNGN);
-        vault = cNGNVault(_vault);
-        ngnUsdFeed = AggregatorV3Interface(_ngnUsdFeed);
-        ngnUsdMaxHeartbeat = _ngnUsdMaxHeartbeat;
+        pyth = IPyth(_pyth);
+        ngnUsdChainlinkFeed = AggregatorV3Interface(_ngnUsdChainlinkFeed);
+        usdNgnMaxStaleness = _usdNgnMaxStaleness;
     }
 
     /*//////////////////////////////////////////////////////////////
-                          ADMIN FUNCTIONS
+                          ADMIN — MARKET MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Configure (or reconfigure) an asset's Chainlink feed.
-    function configureAsset(address _asset, address _priceFeed, uint256 _maxHeartbeat) external restricted {
-        bool existed = assetConfigs[_asset].enabled;
-        assetConfigs[_asset] =
-            AssetConfig({priceFeed: AggregatorV3Interface(_priceFeed), maxHeartbeat: _maxHeartbeat, enabled: true});
-        if (!existed) {
-            supportedAssets.push(_asset);
-        }
-        emit AssetConfigured(_asset, _priceFeed, _maxHeartbeat);
+    /// @notice Register a new perpetual futures market with its own isolated vault.
+    /// @dev The vault must already be deployed and its `setPerpDex()` called to link it
+    ///      back to this PerpDEX instance. The market is immediately enabled for trading.
+    ///      Reverts if a market with the same `_marketId` is already enabled, if the vault
+    ///      address is zero, or if any numeric parameter is zero.
+    ///      Access: restricted via SovereigntyAccessManager (MARKET_MANAGER_ROLE).
+    /// @param _marketId               Unique market identifier (e.g. `keccak256("ETH-PERP")`).
+    /// @param _pythFeedId             Pyth price feed ID for Asset/USD.
+    /// @param _maxStaleness           Maximum acceptable Pyth price age (seconds).
+    /// @param _maxLeverage            Maximum leverage traders can use (e.g. 10 = 10×).
+    /// @param _maintenanceMarginRatio Liquidation threshold (PRECISION, e.g. 2e16 = 2%).
+    /// @param _maxOIMultiplier        Max total OI as a multiple of vault TVL (PRECISION).
+    /// @param _marketType             Asset classification for this market.
+    /// @param _vault                  Address of the pre-deployed MarketVault for this market.
+    function addMarket(
+        bytes32 _marketId,
+        bytes32 _pythFeedId,
+        uint256 _maxStaleness,
+        uint256 _maxLeverage,
+        uint256 _maintenanceMarginRatio,
+        uint256 _maxOIMultiplier,
+        MarketType _marketType,
+        address _vault
+    ) external restricted {
+        if (marketConfigs[_marketId].enabled) revert MarketAlreadyExists();
+        if (_vault == address(0)) revert ZeroAddress();
+        if (_maxLeverage == 0 || _maintenanceMarginRatio == 0 || _maxOIMultiplier == 0) revert InvalidParameters();
+
+        marketConfigs[_marketId] = MarketConfig({
+            pythFeedId: _pythFeedId,
+            maxStaleness: _maxStaleness,
+            maxLeverage: _maxLeverage,
+            maintenanceMarginRatio: _maintenanceMarginRatio,
+            maxOIMultiplier: _maxOIMultiplier,
+            marketType: _marketType,
+            vault: MarketVault(_vault),
+            enabled: true
+        });
+
+        marketIds.push(_marketId);
+
+        emit MarketAdded(_marketId, _pythFeedId, _maxLeverage, _maintenanceMarginRatio, _vault, _marketType);
     }
 
-    /// @notice Update the NGN/USD feed.
-    function setNgnUsdFeed(address _feed, uint256 _maxHeartbeat) external restricted {
-        ngnUsdFeed = AggregatorV3Interface(_feed);
-        ngnUsdMaxHeartbeat = _maxHeartbeat;
-        emit NgnFeedConfigured(_feed, _maxHeartbeat);
+    /// @notice Disable a market so no new positions can be opened.
+    /// @dev Existing positions remain open and can be closed or liquidated normally.
+    ///      The market stays in the `marketIds` array (for Automation iteration) but
+    ///      `executeTrade()` will revert for this market.
+    ///      Access: restricted via SovereigntyAccessManager.
+    /// @param _marketId The market to disable.
+    function disableMarket(bytes32 _marketId) external restricted {
+        if (!marketConfigs[_marketId].enabled) revert MarketNotEnabled();
+        marketConfigs[_marketId].enabled = false;
+        emit MarketDisabled(_marketId);
     }
 
+    /// @notice Update tunable parameters for an existing market.
+    /// @dev Does not modify immutable fields (`pythFeedId`, `marketType`, `vault`).
+    ///      Works on both enabled and disabled markets (disabled markets may still have
+    ///      open positions that need correct margin parameters).
+    ///      Access: restricted via SovereigntyAccessManager.
+    /// @param _marketId               The market to update.
+    /// @param _maxLeverage            New maximum leverage multiplier.
+    /// @param _maintenanceMarginRatio New liquidation threshold (PRECISION).
+    /// @param _maxOIMultiplier        New OI cap relative to vault TVL (PRECISION).
+    /// @param _maxStaleness           New maximum Pyth price age (seconds).
+    function updateMarketParams(
+        bytes32 _marketId,
+        uint256 _maxLeverage,
+        uint256 _maintenanceMarginRatio,
+        uint256 _maxOIMultiplier,
+        uint256 _maxStaleness
+    ) external restricted {
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        if (!cfg.enabled && cfg.pythFeedId == bytes32(0)) revert MarketNotEnabled();
+        if (_maxLeverage == 0 || _maintenanceMarginRatio == 0 || _maxOIMultiplier == 0) revert InvalidParameters();
+
+        cfg.maxLeverage = _maxLeverage;
+        cfg.maintenanceMarginRatio = _maintenanceMarginRatio;
+        cfg.maxOIMultiplier = _maxOIMultiplier;
+        cfg.maxStaleness = _maxStaleness;
+
+        emit MarketUpdated(_marketId, _maxLeverage, _maintenanceMarginRatio);
+    }
+
+    /// @notice Replace the Chainlink NGN/USD price feed and/or its staleness threshold.
+    /// @dev Used if Chainlink deploys a new feed contract or if the staleness window needs
+    ///      adjustment. Takes effect immediately for all subsequent price queries.
+    ///      Access: restricted via SovereigntyAccessManager.
+    /// @param _feed          Address of the new Chainlink AggregatorV3 feed.
+    /// @param _maxStaleness  Maximum acceptable price age (seconds) for the new feed.
+    function setUsdNgnFeed(address _feed, uint256 _maxStaleness) external restricted {
+        ngnUsdChainlinkFeed = AggregatorV3Interface(_feed);
+        usdNgnMaxStaleness = _maxStaleness;
+        emit UsdNgnFeedConfigured(_feed, _maxStaleness);
+    }
+
+    /// @notice Emergency-pause the protocol. All trading, closing, and liquidation functions
+    ///         guarded by `whenNotPaused` will revert until `unpause()` is called.
+    ///         Access: restricted via SovereigntyAccessManager (PAUSER_ROLE).
     function pause() external restricted {
         _pause();
     }
 
+    /// @notice Resume normal protocol operations after a pause.
+    ///         Access: restricted via SovereigntyAccessManager (PAUSER_ROLE).
     function unpause() external restricted {
         _unpause();
     }
 
-    /// @notice Set the Chainlink Automation forwarder address.
-    ///         Called by the admin after registering the upkeep.
+    /// @notice Set the Chainlink Automation forwarder address for automated liquidations.
+    /// @dev After registering an upkeep on Chainlink Automation 2.1, the returned forwarder
+    ///      address must be set here. Only this address can call `performUpkeep()`.
+    ///      Access: restricted via SovereigntyAccessManager.
+    /// @param _forwarder The Automation forwarder contract address.
     function setForwarder(address _forwarder) external restricted {
         liquidationForwarder = _forwarder;
         emit ForwarderSet(_forwarder);
     }
 
     /*//////////////////////////////////////////////////////////////
-                     CHAINLINK TRIANGULATION ORACLE
+                      ORACLE — PRICE TRIANGULATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Returns the mark price of an asset denominated in cNGN (PRECISION scaled).
-    ///         Price_cNGN = Price_Asset/USD / Price_NGN/USD
-    ///         Both prices are validated for staleness.
-    function getMarkPrice(address _asset) external view returns (uint256) {
-        return _getMarkPrice(_asset);
+    /// @notice Returns the mark price of a market denominated in cNGN.
+    /// @dev Performs two-hop triangulation: Asset/USD (Pyth) × USD/NGN (Chainlink inverted).
+    ///      Requires that Pyth on-chain prices have been updated recently (via
+    ///      `updatePythPrices()`). Reverts if either feed is stale or returns an invalid price.
+    /// @param _marketId The market to price.
+    /// @return Mark price in cNGN, normalized to PRECISION (18 decimals).
+    function getMarkPrice(bytes32 _marketId) external view returns (uint256) {
+        return _getMarkPrice(_marketId);
     }
 
-    function _getMarkPrice(address _asset) internal view returns (uint256) {
-        AssetConfig storage cfg = assetConfigs[_asset];
-        if (!cfg.enabled) revert AssetNotEnabled();
+    /// @dev Internal mark price calculation.
+    ///      Formula: `Price_cNGN = (Asset/USD × USD/NGN) / 1e18`
+    ///      Both `assetUsd` and `usdNgn` are 18-decimal, so dividing by PRECISION keeps
+    ///      the result at 18 decimals.
+    function _getMarkPrice(bytes32 _marketId) internal view returns (uint256) {
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        if (cfg.pythFeedId == bytes32(0)) revert MarketNotEnabled();
 
-        // Fetch Asset/USD
-        uint256 assetUsd = _getChainlinkPrice(cfg.priceFeed, cfg.maxHeartbeat);
+        uint256 assetUsd = _getPythPrice(cfg.pythFeedId, cfg.maxStaleness); // Asset/USD (18 dec)
+        uint256 usdNgn = _getUsdNgnRate(); //                                 USD/NGN  (18 dec)
 
-        // Fetch NGN/USD
-        uint256 ngnUsd = _getChainlinkPrice(ngnUsdFeed, ngnUsdMaxHeartbeat);
-
-        // Price_cNGN = (assetUsd * PRECISION) / ngnUsd
-        // Both assetUsd and ngnUsd are already in CHAINLINK_PRECISION (1e8).
-        return (assetUsd * PRECISION) / ngnUsd;
+        return (assetUsd * usdNgn) / PRECISION; // Asset/cNGN (18 dec)
     }
 
-    /// @notice Fetch a Chainlink price and validate staleness. Returns price in CHAINLINK_PRECISION.
-    function _getChainlinkPrice(AggregatorV3Interface _feed, uint256 _maxHeartbeat) internal view returns (uint256) {
-        (, int256 answer,, uint256 updatedAt,) = _feed.latestRoundData();
-        if (answer <= 0) revert InvalidPrice();
-        if (block.timestamp - updatedAt > _maxHeartbeat) {
-            revert StalePrice(address(_feed), updatedAt, _maxHeartbeat);
+    /// @dev Fetch a Pyth price, validate it, and normalize to 18 decimals.
+    ///
+    ///      Validation steps:
+    ///        1. Staleness — `getPriceNoOlderThan` reverts if the price is older than `_maxStaleness`.
+    ///        2. Non-negative — `price <= 0` → revert.
+    ///        3. Confidence — the Pyth 95% confidence interval must satisfy:
+    ///           `conf / price < MAX_CONFIDENCE_RATIO` (2.5%).
+    ///           Rewritten to avoid division: `conf × PRECISION < MAX_CONFIDENCE_RATIO × price`.
+    ///
+    ///      Normalization:
+    ///        Pyth prices have a variable `expo` (e.g. -8). `PythUtils.convertToUint` scales
+    ///        the raw price to `PYTH_TARGET_DECIMALS` (18), so all downstream math uses
+    ///        a uniform precision.
+    ///
+    /// @param _feedId       Pyth price feed identifier for the asset.
+    /// @param _maxStaleness Maximum acceptable price age (seconds).
+    /// @return Price normalized to 18 decimals (PRECISION).
+    function _getPythPrice(bytes32 _feedId, uint256 _maxStaleness) internal view returns (uint256) {
+        PythStructs.Price memory priceData = pyth.getPriceNoOlderThan(_feedId, _maxStaleness);
+
+        if (priceData.price <= 0) revert InvalidPrice();
+
+        // Confidence-to-price ratio check (avoids division-by-zero and rounding issues)
+        uint256 absPrice = uint256(uint64(priceData.price));
+        if (uint256(priceData.conf) * PRECISION > MAX_CONFIDENCE_RATIO * absPrice) {
+            revert PriceConfidenceTooWide();
         }
-        return uint256(answer);
+
+        return PythUtils.convertToUint(priceData.price, priceData.expo, PYTH_TARGET_DECIMALS);
+    }
+
+    /// @dev Fetch the USD/NGN exchange rate from the Chainlink NGN/USD feed and invert it.
+    ///
+    ///      The Chainlink feed reports NGN/USD (e.g. 0.00073480 with 8 decimals = 73480).
+    ///      We need USD/NGN (e.g. ~1,360 NGN per 1 USD). Inversion formula:
+    ///
+    ///        USD/NGN = (PRECISION × 10^feedDecimals) / answer
+    ///                = (1e18 × 1e8) / 73480
+    ///                ≈ 1,360.9e18   (18-decimal result)
+    ///
+    ///      Validation:
+    ///        - `answer > 0` (non-zero, positive price).
+    ///        - `block.timestamp − updatedAt ≤ usdNgnMaxStaleness` (freshness).
+    ///
+    /// @return USD/NGN rate normalized to 18 decimals (PRECISION).
+    function _getUsdNgnRate() internal view returns (uint256) {
+        (, int256 answer,, uint256 updatedAt,) = ngnUsdChainlinkFeed.latestRoundData();
+        if (answer <= 0) revert InvalidPrice();
+        if (block.timestamp - updatedAt > usdNgnMaxStaleness) revert StaleChainlinkPrice();
+
+        uint8 feedDecimals = ngnUsdChainlinkFeed.decimals();
+        return (PRECISION * 10 ** feedDecimals) / uint256(answer);
+    }
+
+    /// @notice Push fresh Pyth price data on-chain. Must be called before any price-dependent
+    ///         operation (trading, liquidation, collateral management).
+    /// @dev The caller sends ETH to cover the Pyth update fee. Any excess ETH is refunded
+    ///      automatically. Typically bundled in the same transaction as `executeTrade()`.
+    /// @param _priceUpdate Pyth price update payload(s) obtained from the Hermes API.
+    function updatePythPrices(bytes[] calldata _priceUpdate) external payable {
+        uint256 fee = pyth.getUpdateFee(_priceUpdate);
+        pyth.updatePriceFeeds{value: fee}(_priceUpdate);
+
+        // Refund excess ETH
+        if (msg.value > fee) {
+            (bool ok,) = msg.sender.call{value: msg.value - fee}("");
+            require(ok);
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
                        FUNDING RATE ENGINE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Update the global funding index for an asset based on OI imbalance.
-    ///         Funding is linear per-second: longs pay shorts when longOI > shortOI, vice versa.
-    function _updateFunding(address _asset) internal {
-        MarketOI storage moi = marketOI[_asset];
+    /// @dev Accrue funding for a market based on the OI imbalance since the last update.
+    ///
+    ///      Funding is a zero-sum transfer between longs and shorts that incentivizes
+    ///      OI balance. The dominant side pays the minority side.
+    ///
+    ///      Calculation:
+    ///        imbalance  = (longOI − shortOI) / totalOI       ∈ [-1, 1]  (PRECISION scaled)
+    ///        fundingΔ   = imbalance × FUNDING_RATE_PER_SECOND × elapsed / PRECISION
+    ///        fundingIndex += fundingΔ
+    ///
+    ///      When `imbalance > 0` (more longs), `fundingIndex` rises → longs pay, shorts earn.
+    ///      When `imbalance < 0` (more shorts), `fundingIndex` falls → shorts pay, longs earn.
+    ///
+    ///      Called at the start of every state-changing operation (open, close, liquidate,
+    ///      add/remove collateral) to ensure the index is current before PnL calculations.
+    /// @param _marketId The market to update funding for.
+    function _updateFunding(bytes32 _marketId) internal {
+        MarketOI storage moi = marketOI[_marketId];
+
+        // First call for this market — initialize timestamp, no accrual needed
         if (moi.lastFundingUpdate == 0) {
             moi.lastFundingUpdate = block.timestamp;
             return;
         }
 
         uint256 elapsed = block.timestamp - moi.lastFundingUpdate;
-        if (elapsed == 0) return;
+        if (elapsed == 0) return; // Same block — no time has passed
 
         uint256 totalOI = moi.longOI + moi.shortOI;
         if (totalOI == 0) {
+            // No open interest — nothing to accrue, just update timestamp
             moi.lastFundingUpdate = block.timestamp;
             return;
         }
 
-        // imbalance = (longOI - shortOI) / totalOI  — signed, in PRECISION
+        // imbalance ∈ [-PRECISION, PRECISION], representing [-100%, 100%]
         int256 imbalance = (int256(moi.longOI) - int256(moi.shortOI)) * int256(PRECISION) / int256(totalOI);
 
-        // fundingDelta = imbalance * rate * elapsed
+        // Funding delta: imbalance × rate × time, normalized back to PRECISION
         int256 fundingDelta = imbalance * int256(FUNDING_RATE_PER_SECOND) * int256(elapsed) / int256(PRECISION);
 
         moi.fundingIndex += fundingDelta;
         moi.lastFundingUpdate = block.timestamp;
 
-        emit FundingUpdated(_asset, moi.fundingIndex);
+        emit FundingUpdated(_marketId, moi.fundingIndex);
     }
 
-    /// @notice Calculate the pending funding payment for a position.
-    ///         Positive = position owes funding, Negative = position receives funding.
-    function _pendingFunding(address _asset, Position storage pos) internal view returns (int256) {
-        MarketOI storage moi = marketOI[_asset];
+    /// @dev Calculate the funding payment owed by (or owed to) a specific position.
+    ///
+    ///      `indexDelta = currentFundingIndex − entryFundingIndex`
+    ///
+    ///      - Longs: `funding = size × indexDelta / PRECISION`
+    ///        Positive indexDelta → longs pay (funding is a cost, subtracted from equity).
+    ///      - Shorts: `funding = −(size × indexDelta / PRECISION)`
+    ///        Positive indexDelta → shorts earn (funding is a credit, added to equity).
+    ///
+    ///      The returned value is subtracted from raw PnL at settlement:
+    ///        `netPnL = rawPnL − pendingFunding`
+    ///
+    /// @param _marketId The market the position belongs to.
+    /// @param pos       Storage reference to the trader's position.
+    /// @return Funding cost (positive = trader pays, negative = trader receives). PRECISION scaled.
+    function _pendingFunding(bytes32 _marketId, Position storage pos) internal view returns (int256) {
+        MarketOI storage moi = marketOI[_marketId];
         int256 indexDelta = moi.fundingIndex - pos.entryFundingIndex;
 
-        // Longs pay positive funding, shorts receive positive funding.
-        int256 funding;
         if (pos.side == Side.Long) {
-            funding = int256(pos.size) * indexDelta / int256(PRECISION);
+            return int256(pos.size) * indexDelta / int256(PRECISION);
         } else {
-            funding = -(int256(pos.size) * indexDelta / int256(PRECISION));
+            return -(int256(pos.size) * indexDelta / int256(PRECISION));
         }
-        return funding;
     }
 
     /*//////////////////////////////////////////////////////////////
                        COMMIT-REVEAL TRADING
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Step 1: Commit a trade order hash. The hash encodes the full order params.
-    /// @param _orderHash keccak256(abi.encode(trader, asset, side, collateral, leverage, salt))
+    /// @notice Step 1 of the commit-reveal order flow: commit a hashed order.
+    /// @dev The trader computes `keccak256(abi.encode(trader, marketId, side, collateral,
+    ///      leverage, salt))` off-chain and submits only the hash. This prevents miners and
+    ///      searchers from front-running the trade because the parameters are hidden.
+    ///      Only one pending order per address is allowed; a new commit overwrites the old one.
+    /// @param _orderHash The keccak256 hash of the order parameters.
     function requestTrade(bytes32 _orderHash) external whenNotPaused {
         committedOrders[msg.sender] = CommittedOrder({orderHash: _orderHash, commitBlock: block.number});
         emit TradeCommitted(msg.sender, _orderHash, block.number);
     }
 
-    /// @notice Step 2: Execute the committed trade by revealing the parameters.
-    ///         Must wait MIN_BLOCK_DELAY blocks and execute before MAX_BLOCK_DELAY.
-    function executeTrade(address _asset, Side _side, uint256 _collateral, uint256 _leverage, bytes32 _salt)
+    /// @notice Step 2 of the commit-reveal order flow: reveal parameters and open a position.
+    /// @dev The trader reveals the same parameters used to generate the committed hash.
+    ///      Execution is only valid within the block window [commitBlock + MIN_BLOCK_DELAY,
+    ///      commitBlock + MAX_BLOCK_DELAY]. The price used is the current mark price, not
+    ///      the price at commit time, ensuring the trader cannot lock in a favorable price.
+    ///
+    ///      Flow:
+    ///        1. Verify commit-reveal timing and hash match.
+    ///        2. Validate inputs (collateral > 0, market enabled, leverage within bounds).
+    ///        3. Update the market's funding index.
+    ///        4. Fetch the current mark price (Asset/cNGN via oracle triangulation).
+    ///        5. Scale collateral to internal precision and compute notional size.
+    ///        6. Check that the position does not breach the market's OI cap.
+    ///        7. Transfer cNGN from trader to the market's vault.
+    ///        8. Record the position and update aggregate OI / weighted average prices.
+    ///        9. Track the trader in the per-market trader set (for Automation iteration).
+    ///
+    ///      Only one position per (market, trader) is allowed. Call `closePosition()` first
+    ///      to open a new one.
+    ///
+    /// @param _marketId   The market to trade in.
+    /// @param _side       Long or Short.
+    /// @param _collateral Margin deposit in cNGN (token precision, 6 decimals).
+    /// @param _leverage   Leverage multiplier (e.g. 5 = 5×). Must be ≤ `maxLeverage`.
+    /// @param _salt       Random nonce used in the commit hash to prevent hash collisions.
+    function executeTrade(bytes32 _marketId, Side _side, uint256 _collateral, uint256 _leverage, bytes32 _salt)
         external
         nonReentrant
         whenNotPaused
@@ -331,39 +729,41 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         if (block.number <= order.commitBlock + MIN_BLOCK_DELAY) revert TooEarlyToExecute();
         if (block.number > order.commitBlock + MAX_BLOCK_DELAY) revert OrderExpired();
 
-        bytes32 expectedHash = keccak256(abi.encode(msg.sender, _asset, _side, _collateral, _leverage, _salt));
+        bytes32 expectedHash = keccak256(abi.encode(msg.sender, _marketId, _side, _collateral, _leverage, _salt));
         if (order.orderHash != expectedHash) revert OrderHashMismatch();
 
-        // Clear committed order
         delete committedOrders[msg.sender];
 
         // --- Validate inputs ---
         if (_collateral == 0) revert ZeroAmount();
-        if (_leverage == 0 || _leverage > MAX_LEVERAGE) revert ExceedsMaxLeverage();
 
-        AssetConfig storage cfg = assetConfigs[_asset];
-        if (!cfg.enabled) revert AssetNotEnabled();
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        if (!cfg.enabled) revert MarketNotEnabled();
+        if (_leverage == 0 || _leverage > cfg.maxLeverage) revert ExceedsMaxLeverage();
 
-        Position storage pos = positions[_asset][msg.sender];
+        Position storage pos = positions[_marketId][msg.sender];
         if (pos.size > 0) revert PositionAlreadyOpen();
 
-        // --- Update funding before state changes ---
-        _updateFunding(_asset);
+        // --- Update funding ---
+        _updateFunding(_marketId);
 
         // --- Fetch mark price ---
-        uint256 markPrice = _getMarkPrice(_asset);
+        uint256 markPrice = _getMarkPrice(_marketId);
 
-        // --- Calculate position size (PRECISION scaled cNGN notional) ---
-        // collateral is in raw cNGN decimals. Convert to PRECISION for internal math.
+        // --- Calculate position size ---
         uint256 collateralScaled = _toInternalPrecision(_collateral);
         uint256 size = collateralScaled * _leverage;
 
-        // --- Pull collateral from trader to vault ---
+        // --- Check OI cap ---
+        _checkOICap(_marketId, cfg, size);
+
+        // --- Pull collateral from trader to market vault ---
+        MarketVault vault = cfg.vault;
         cNGN.safeTransferFrom(msg.sender, address(vault), _collateral);
-        totalCollateralHeld += _collateral;
+        marketCollateralHeld[_marketId] += _collateral;
 
         // --- Store position ---
-        MarketOI storage moi = marketOI[_asset];
+        MarketOI storage moi = marketOI[_marketId];
         pos.size = size;
         pos.collateral = _collateral;
         pos.averagePrice = markPrice;
@@ -371,6 +771,10 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         pos.side = _side;
 
         // --- Update OI & weighted average prices ---
+        // The weighted average entry price is maintained for efficient aggregate PnL:
+        //   newAvg = (oldAvg × oldOI + markPrice × newSize) / (oldOI + newSize)
+        // This allows `_marketUnrealizedPnL` to compute unrealized PnL for the entire
+        // side (all longs or all shorts) without iterating over individual positions.
         if (_side == Side.Long) {
             moi.avgLongPrice =
                 moi.longOI == 0 ? markPrice : (moi.avgLongPrice * moi.longOI + markPrice * size) / (moi.longOI + size);
@@ -382,134 +786,178 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             moi.shortOI += size;
         }
 
-        // --- Track trader in asset's trader set ---
-        _addTrader(_asset, msg.sender);
+        // Register trader in the per-market set for Automation liquidation scans
+        _addTrader(_marketId, msg.sender);
 
-        emit PositionOpened(msg.sender, _asset, _side, size, _collateral, markPrice);
+        emit PositionOpened(msg.sender, _marketId, _side, size, _collateral, markPrice);
     }
 
     /*//////////////////////////////////////////////////////////////
                      COLLATERAL MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Add collateral to an existing position, lowering effective leverage.
-    /// @param _asset The market the position is in.
-    /// @param _amount Raw cNGN amount (6 decimals) to add.
-    function addCollateral(address _asset, uint256 _amount) external nonReentrant whenNotPaused {
+    /// @notice Deposit additional cNGN collateral into an existing position.
+    /// @dev Increases the position's margin, thereby lowering effective leverage and
+    ///      reducing liquidation risk. The collateral is transferred to the market's vault.
+    ///      Funding is updated before recording the new collateral amount.
+    /// @param _marketId The market the position belongs to.
+    /// @param _amount   Amount of cNGN to add (token precision, 6 decimals).
+    function addCollateral(bytes32 _marketId, uint256 _amount) external nonReentrant whenNotPaused {
         if (_amount == 0) revert ZeroAmount();
-        Position storage pos = positions[_asset][msg.sender];
+        Position storage pos = positions[_marketId][msg.sender];
         if (pos.size == 0) revert NoOpenPosition();
 
-        _updateFunding(_asset);
+        _updateFunding(_marketId);
 
-        // Pull cNGN from trader directly to the vault
+        MarketVault vault = marketConfigs[_marketId].vault;
         cNGN.safeTransferFrom(msg.sender, address(vault), _amount);
 
         pos.collateral += _amount;
-        totalCollateralHeld += _amount;
+        marketCollateralHeld[_marketId] += _amount;
 
-        emit CollateralAdded(msg.sender, _asset, _amount);
+        emit CollateralAdded(msg.sender, _marketId, _amount);
     }
 
-    /// @notice Remove collateral from an existing position, raising effective leverage.
-    ///         Reverts if the removal would exceed MAX_LEVERAGE or leave non-positive equity.
-    /// @param _asset The market the position is in.
-    /// @param _amount Raw cNGN amount (6 decimals) to remove.
-    function removeCollateral(address _asset, uint256 _amount) external nonReentrant whenNotPaused {
+    /// @notice Withdraw collateral from an existing position, raising effective leverage.
+    /// @dev Validates two safety invariants after the hypothetical removal:
+    ///      1. Remaining equity (collateral + unrealized PnL − funding) must be > 0.
+    ///      2. Resulting leverage (size / equity) must not exceed `maxLeverage`.
+    ///      If either check fails, the withdrawal is rejected. Collateral is paid out from
+    ///      the market's vault directly to the trader.
+    /// @param _marketId The market the position belongs to.
+    /// @param _amount   Amount of cNGN to withdraw (token precision, 6 decimals).
+    function removeCollateral(bytes32 _marketId, uint256 _amount) external nonReentrant whenNotPaused {
         if (_amount == 0) revert ZeroAmount();
-        Position storage pos = positions[_asset][msg.sender];
+        Position storage pos = positions[_marketId][msg.sender];
         if (pos.size == 0) revert NoOpenPosition();
 
-        _updateFunding(_asset);
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        _updateFunding(_marketId);
 
-        // Compute current unrealized PnL and pending funding
-        uint256 markPrice = _getMarkPrice(_asset);
+        uint256 markPrice = _getMarkPrice(_marketId);
         int256 pnl = _calculatePnL(pos, markPrice);
-        int256 funding = _pendingFunding(_asset, pos);
+        int256 funding = _pendingFunding(_marketId, pos);
         int256 netPnL = pnl - funding;
 
-        // Remaining equity after removal (all in PRECISION / 1e18)
         uint256 remainingCollateralScaled = _toInternalPrecision(pos.collateral - _amount);
         int256 remainingEquity = int256(remainingCollateralScaled) + netPnL;
 
-        // Safety: equity must remain positive
         if (remainingEquity <= 0) revert InsufficientEquity();
-
-        // Safety: effective leverage must not exceed MAX_LEVERAGE
-        // size / equity <= MAX_LEVERAGE  →  size <= equity * MAX_LEVERAGE
-        if (pos.size > uint256(remainingEquity) * MAX_LEVERAGE) revert ExceedsLeverageAfterRemoval();
+        if (pos.size > uint256(remainingEquity) * cfg.maxLeverage) revert ExceedsLeverageAfterRemoval();
 
         pos.collateral -= _amount;
-        totalCollateralHeld -= _amount;
+        marketCollateralHeld[_marketId] -= _amount;
 
-        vault.payTrader(msg.sender, _amount);
+        cfg.vault.payTrader(msg.sender, _amount);
 
-        emit CollateralRemoved(msg.sender, _asset, _amount);
+        emit CollateralRemoved(msg.sender, _marketId, _amount);
     }
 
     /*//////////////////////////////////////////////////////////////
                           CLOSE POSITION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Close the caller's position for a given asset, settling PnL.
-    function closePosition(address _asset) external nonReentrant whenNotPaused {
-        _closePosition(_asset, msg.sender, false, address(0));
+    /// @notice Voluntarily close the caller's position in a market, settling all PnL.
+    /// @dev Delegates to `_closePosition()` with `_isLiquidation = false`. The trader
+    ///      receives their remaining equity (collateral ± PnL − funding) from the vault.
+    /// @param _marketId The market to close the position in.
+    function closePosition(bytes32 _marketId) external nonReentrant whenNotPaused {
+        _closePosition(_marketId, msg.sender, false, address(0));
     }
 
     /*//////////////////////////////////////////////////////////////
                            LIQUIDATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Anyone can liquidate an underwater position and earn a bounty.
-    function liquidate(address _asset, address _trader) external nonReentrant whenNotPaused {
-        Position storage pos = positions[_asset][_trader];
+    /// @notice Permissionless liquidation: anyone can liquidate an underwater position.
+    /// @dev The caller earns a liquidation bounty (1% of the trader's remaining equity,
+    ///      if positive). The position is force-closed and PnL is settled.
+    ///      Reverts with `NotLiquidatable` if equity ≥ maintenance margin.
+    /// @param _marketId The market the position is in.
+    /// @param _trader   The address of the trader to liquidate.
+    function liquidate(bytes32 _marketId, address _trader) external nonReentrant whenNotPaused {
+        Position storage pos = positions[_marketId][_trader];
         if (pos.size == 0) revert NoOpenPosition();
 
-        _updateFunding(_asset);
+        _updateFunding(_marketId);
 
-        uint256 markPrice = _getMarkPrice(_asset);
-        _validateAndLiquidate(_asset, _trader, markPrice, msg.sender);
+        uint256 markPrice = _getMarkPrice(_marketId);
+        _validateAndLiquidate(_marketId, _trader, markPrice, msg.sender);
     }
 
-    /// @notice Internal: verify maintenance margin breach and close.
-    function _validateAndLiquidate(address _asset, address _trader, uint256 _markPrice, address _liquidator) internal {
-        Position storage pos = positions[_asset][_trader];
+    /// @dev Validate that a position is liquidatable, then force-close it.
+    ///
+    ///      Liquidation condition (either triggers liquidation):
+    ///        - `equity < 0` (position is bankrupt, trader owes more than collateral), OR
+    ///        - `equity × PRECISION < maintenanceMarginRatio × size`
+    ///          (equity has fallen below the maintenance margin threshold).
+    ///
+    ///      If neither condition is met, reverts with `NotLiquidatable`.
+    function _validateAndLiquidate(bytes32 _marketId, address _trader, uint256 _markPrice, address _liquidator)
+        internal
+    {
+        Position storage pos = positions[_marketId][_trader];
+        MarketConfig storage cfg = marketConfigs[_marketId];
         int256 pnl = _calculatePnL(pos, _markPrice);
-        int256 funding = _pendingFunding(_asset, pos);
+        int256 funding = _pendingFunding(_marketId, pos);
         int256 netPnL = pnl - funding;
 
         uint256 collateralScaled = _toInternalPrecision(pos.collateral);
         int256 equity = int256(collateralScaled) + netPnL;
 
-        // Check maintenance margin: equity / size < MAINTENANCE_MARGIN_RATIO
-        // Rewritten to: equity * PRECISION < MAINTENANCE_MARGIN_RATIO * size
-        if (equity >= 0 && uint256(equity) * PRECISION >= MAINTENANCE_MARGIN_RATIO * pos.size) {
+        if (equity >= 0 && uint256(equity) * PRECISION >= cfg.maintenanceMarginRatio * pos.size) {
             revert NotLiquidatable();
         }
 
-        _closePosition(_asset, _trader, true, _liquidator);
+        _closePosition(_marketId, _trader, true, _liquidator);
     }
 
     /*//////////////////////////////////////////////////////////////
                       INTERNAL CLOSE + SETTLE
     //////////////////////////////////////////////////////////////*/
 
-    function _closePosition(address _asset, address _trader, bool _isLiquidation, address _liquidator) internal {
-        Position storage pos = positions[_asset][_trader];
+    /// @dev Core position closure logic — used by both voluntary close and liquidation.
+    ///
+    ///      Settlement flow:
+    ///        1. Update funding for the market (ensures funding index is current).
+    ///        2. Fetch the current mark price and compute net PnL (raw PnL − funding).
+    ///        3. Update aggregate OI and recalculate weighted average prices.
+    ///        4. Compute trader equity = collateral (scaled to 18 dec) + netPnL.
+    ///        5. Convert equity to token precision (6 dec) → `traderReceives`.
+    ///        6. If liquidation and equity > 0, deduct the liquidation bounty (1%).
+    ///        7. Record realized PnL in the vault via `settlePnL()`.
+    ///        8. Pay the trader and (if applicable) the liquidator from the vault.
+    ///        9. Delete the position and remove the trader from the per-market set.
+    ///
+    ///      Automated vs. public liquidation:
+    ///        - Public liquidator (any EOA): receives the bounty directly.
+    ///        - Automated (forwarder): bounty stays in the vault as protocol yield.
+    ///          An `AutomatedLiquidation` event is emitted to track the captured yield.
+    ///
+    /// @param _marketId      The market the position belongs to.
+    /// @param _trader        The trader whose position is being closed.
+    /// @param _isLiquidation True if this is a liquidation (bounty logic applies).
+    /// @param _liquidator    Address of the liquidator (or forwarder). Ignored if `!_isLiquidation`.
+    function _closePosition(bytes32 _marketId, address _trader, bool _isLiquidation, address _liquidator) internal {
+        Position storage pos = positions[_marketId][_trader];
         if (pos.size == 0) revert NoOpenPosition();
 
-        _updateFunding(_asset);
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        _updateFunding(_marketId);
 
-        uint256 markPrice = _getMarkPrice(_asset);
+        uint256 markPrice = _getMarkPrice(_marketId);
         int256 pnl = _calculatePnL(pos, markPrice);
-        int256 funding = _pendingFunding(_asset, pos);
+        int256 funding = _pendingFunding(_marketId, pos);
         int256 netPnL = pnl - funding;
 
-        // --- Update OI & weighted average prices ---
-        MarketOI storage moi = marketOI[_asset];
+        // --- Remove this position's contribution from aggregate OI & weighted averages ---
+        // Reverse the weighted average formula: remove this position's entry price × size
+        // from the cumulative total, then divide by the reduced OI.
+        // If this was the last position on a side, reset the average to 0.
+        MarketOI storage moi = marketOI[_marketId];
         if (pos.side == Side.Long) {
             if (moi.longOI == pos.size) {
-                moi.avgLongPrice = 0;
+                moi.avgLongPrice = 0; // Last long — reset
             } else {
                 uint256 oldTotal = moi.avgLongPrice * moi.longOI;
                 uint256 removal = pos.averagePrice * pos.size;
@@ -519,7 +967,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             moi.longOI -= pos.size;
         } else {
             if (moi.shortOI == pos.size) {
-                moi.avgShortPrice = 0;
+                moi.avgShortPrice = 0; // Last short — reset
             } else {
                 uint256 oldTotal = moi.avgShortPrice * moi.shortOI;
                 uint256 removal = pos.averagePrice * pos.size;
@@ -529,18 +977,22 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             moi.shortOI -= pos.size;
         }
 
-        // --- Settle PnL ---
+        // --- Settle PnL and distribute funds ---
         uint256 collateral = pos.collateral;
-        totalCollateralHeld -= collateral;
+        marketCollateralHeld[_marketId] -= collateral;
+
+        // Scale collateral to 18 dec and compute equity = collateral + netPnL
         uint256 collateralScaled = _toInternalPrecision(collateral);
         int256 equity = int256(collateralScaled) + netPnL;
 
-        // Clamp equity to zero floor (trader can't owe more than collateral in this model)
+        // If equity > 0, trader receives the equivalent in token precision (6 dec).
+        // If equity ≤ 0, the position is bankrupt — trader receives nothing.
         uint256 traderReceives;
         if (equity > 0) {
             traderReceives = _fromInternalPrecision(uint256(equity));
         }
 
+        // Liquidation bounty: 1% of traderReceives, deducted from the trader's payout
         uint256 bounty;
         bool isProtocolLiquidation = _isLiquidation && _liquidator == liquidationForwarder;
         if (_isLiquidation && traderReceives > 0) {
@@ -548,35 +1000,38 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             traderReceives -= bounty;
         }
 
-        // Record PnL on vault in token precision (positive = trader profit, vault loss)
+        MarketVault vault = cfg.vault;
+
+        // Record realized PnL in the vault's accounting (affects share price)
         int256 realisedPnLTokens = _toTokenPnL(netPnL);
         vault.settlePnL(realisedPnLTokens);
 
-        // Pay trader
+        // Pay trader their remaining equity (after bounty deduction)
         if (traderReceives > 0) {
             vault.payTrader(_trader, traderReceives);
         }
 
-        // Pay liquidator bounty (external only; for protocol liquidations bounty stays in vault)
+        // Public liquidator gets the bounty paid out; forwarder bounty stays in vault
         if (bounty > 0 && !isProtocolLiquidation) {
             vault.payTrader(_liquidator, bounty);
         }
 
-        // Clear position and remove from trader set
-        delete positions[_asset][_trader];
-        _removeTrader(_asset, _trader);
+        // Clean up storage
+        delete positions[_marketId][_trader];
+        _removeTrader(_marketId, _trader);
 
+        // Emit appropriate event(s)
         if (_isLiquidation) {
             if (isProtocolLiquidation) {
-                // Yield captured = what would have been the bounty
+                // Forwarder liquidation: bounty stays in vault → emit yield amount for tracking
                 uint256 yieldCaptured = traderReceives > 0
                     ? ((_fromInternalPrecision(uint256(equity)) * LIQUIDATION_BOUNTY_RATIO) / PRECISION)
                     : 0;
-                emit AutomatedLiquidation(_trader, _asset, yieldCaptured);
+                emit AutomatedLiquidation(_trader, _marketId, yieldCaptured);
             }
-            emit PositionLiquidated(_trader, _asset, _liquidator, bounty, markPrice);
+            emit PositionLiquidated(_trader, _marketId, _liquidator, bounty, markPrice);
         } else {
-            emit PositionClosed(_trader, _asset, realisedPnLTokens, markPrice);
+            emit PositionClosed(_trader, _marketId, realisedPnLTokens, markPrice);
         }
     }
 
@@ -584,73 +1039,305 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
                           PNL CALCULATIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Calculate unrealized PnL for a position (PRECISION scaled, in cNGN terms).
+    /// @dev Calculate the raw (pre-funding) PnL of a position at a given mark price.
+    ///
+    ///      Formula:
+    ///        pnl = size × (markPrice − entryPrice) / entryPrice
+    ///
+    ///      For shorts, the sign is flipped: shorts profit when the price falls.
+    ///      Result is in PRECISION (18 decimals), same unit as `size`.
+    ///
+    /// @param pos        Storage reference to the trader's position.
+    /// @param _markPrice Current mark price of the asset in cNGN (PRECISION).
+    /// @return Raw PnL in PRECISION. Positive = profit, negative = loss.
     function _calculatePnL(Position storage pos, uint256 _markPrice) internal view returns (int256) {
-        // priceDelta = markPrice - averagePrice (both in PRECISION)
         int256 priceDelta = int256(_markPrice) - int256(pos.averagePrice);
-
-        // pnl = size * priceDelta / averagePrice
         int256 pnl = int256(pos.size) * priceDelta / int256(pos.averagePrice);
 
-        // Shorts profit when price goes down
         if (pos.side == Side.Short) {
-            pnl = -pnl;
+            pnl = -pnl; // Shorts profit from price decreases
         }
         return pnl;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          OI CAP CHECK
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Ensure that adding `_additionalSize` to the market's total OI does not exceed
+    ///      the maximum allowed OI, which is defined as `vaultTVL × maxOIMultiplier`.
+    ///
+    ///      This protects LPs from excessive exposure: if the vault holds 100k cNGN and
+    ///      `maxOIMultiplier` is 5×, total OI across both sides is capped at 500k cNGN.
+    ///
+    ///      Uses the vault's raw token balance (not `totalAssets()`) because `totalAssets`
+    ///      already subtracts collateral/PnL, which would make the cap too restrictive.
+    ///
+    /// @param _marketId       The market being traded.
+    /// @param _cfg            Storage reference to the market's config.
+    /// @param _additionalSize The notional size of the new position (PRECISION).
+    function _checkOICap(bytes32 _marketId, MarketConfig storage _cfg, uint256 _additionalSize) internal view {
+        MarketOI storage moi = marketOI[_marketId];
+        uint256 totalOI = moi.longOI + moi.shortOI + _additionalSize;
+        uint256 vaultTVL = _toInternalPrecision(IERC20(_cfg.vault.asset()).balanceOf(address(_cfg.vault)));
+        uint256 maxOI = (vaultTVL * _cfg.maxOIMultiplier) / PRECISION;
+        if (totalOI > maxOI) revert ExceedsMaxOI();
     }
 
     /*//////////////////////////////////////////////////////////////
                           VIEW FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Get full position info for a trader on an asset.
-    function getPosition(address _asset, address _trader) external view returns (Position memory) {
-        return positions[_asset][_trader];
+    /// @notice Get a trader's position in a specific market.
+    /// @param _marketId The market to query.
+    /// @param _trader   The trader's address.
+    /// @return The Position struct (zero `size` if no position exists).
+    function getPosition(bytes32 _marketId, address _trader) external view returns (Position memory) {
+        return positions[_marketId][_trader];
     }
 
-    /// @notice Get the current OI data for an asset.
-    function getMarketOI(address _asset) external view returns (MarketOI memory) {
-        return marketOI[_asset];
+    /// @notice Get aggregate open interest data for a market.
+    /// @param _marketId The market to query.
+    /// @return The MarketOI struct (longOI, shortOI, average prices, funding index).
+    function getMarketOI(bytes32 _marketId) external view returns (MarketOI memory) {
+        return marketOI[_marketId];
     }
 
-    /// @notice Get the number of supported assets.
-    function supportedAssetsLength() external view returns (uint256) {
-        return supportedAssets.length;
+    /// @notice Get the number of listed markets.
+    /// @return Length of the `marketIds` array.
+    function marketIdsLength() external view returns (uint256) {
+        return marketIds.length;
     }
 
-    /// @notice Check if a position is liquidatable.
-    function isLiquidatable(address _asset, address _trader) external view returns (bool) {
-        Position storage pos = positions[_asset][_trader];
+    /// @notice Check whether a trader's position is currently liquidatable.
+    /// @dev Computes equity at the current mark price including pending funding.
+    ///      Returns `false` if the trader has no open position.
+    /// @param _marketId The market to check.
+    /// @param _trader   The trader's address.
+    /// @return True if the position can be liquidated, false otherwise.
+    function isLiquidatable(bytes32 _marketId, address _trader) external view returns (bool) {
+        Position storage pos = positions[_marketId][_trader];
         if (pos.size == 0) return false;
 
-        uint256 markPrice = _getMarkPrice(_asset);
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        uint256 markPrice = _getMarkPrice(_marketId);
         int256 pnl = _calculatePnL(pos, markPrice);
-        int256 funding = _pendingFunding(_asset, pos);
+        int256 funding = _pendingFunding(_marketId, pos);
         int256 netPnL = pnl - funding;
 
         uint256 collateralScaled = _toInternalPrecision(pos.collateral);
         int256 equity = int256(collateralScaled) + netPnL;
 
         if (equity < 0) return true;
-        return uint256(equity) * PRECISION < MAINTENANCE_MARGIN_RATIO * pos.size;
+        return uint256(equity) * PRECISION < cfg.maintenanceMarginRatio * pos.size;
+    }
+
+    /// @notice Calculate the aggregate unrealized PnL for all open positions in a market.
+    /// @dev Uses volume-weighted average entry prices for efficiency — no per-position iteration.
+    ///      Result is in cNGN token precision (6 decimals). Positive = traders collectively
+    ///      winning (vault liability). Used by `MarketVault.totalAssets()` to adjust share price.
+    /// @param _marketId The market to query.
+    /// @return Net unrealized PnL (6 decimals). Positive = traders in profit.
+    function getMarketUnrealizedPnL(bytes32 _marketId) external view returns (int256) {
+        MarketOI storage moi = marketOI[_marketId];
+        if (moi.longOI == 0 && moi.shortOI == 0) return 0;
+        return _marketUnrealizedPnL(_marketId, _getMarkPrice(_marketId));
+    }
+
+    /// @dev Internal aggregate unrealized PnL calculation.
+    ///
+    ///      For each side (long / short), PnL is computed from the weighted average entry
+    ///      price rather than iterating individual positions. This is gas-efficient and
+    ///      mathematically equivalent because PnL is linear in price:
+    ///
+    ///        longPnL  = longOI  × (markPrice − avgLongPrice)  / avgLongPrice
+    ///        shortPnL = shortOI × (avgShortPrice − markPrice) / avgShortPrice
+    ///        totalPnL = longPnL + shortPnL
+    ///
+    ///      The result is converted from PRECISION (18 dec) to token precision (6 dec).
+    ///
+    /// @param _marketId  The market to compute PnL for.
+    /// @param markPrice  Pre-fetched mark price (avoids double oracle call).
+    /// @return Net unrealized PnL in cNGN token precision (6 decimals).
+    function _marketUnrealizedPnL(bytes32 _marketId, uint256 markPrice) internal view returns (int256) {
+        MarketOI storage moi = marketOI[_marketId];
+        if (moi.longOI == 0 && moi.shortOI == 0) return 0;
+
+        int256 totalPnL;
+
+        if (moi.longOI > 0 && moi.avgLongPrice > 0) {
+            int256 priceDelta = int256(markPrice) - int256(moi.avgLongPrice);
+            totalPnL += int256(moi.longOI) * priceDelta / int256(moi.avgLongPrice);
+        }
+        if (moi.shortOI > 0 && moi.avgShortPrice > 0) {
+            int256 priceDelta = int256(moi.avgShortPrice) - int256(markPrice);
+            totalPnL += int256(moi.shortOI) * priceDelta / int256(moi.avgShortPrice);
+        }
+
+        return _toTokenPnL(totalPnL);
+    }
+
+    /// @notice Get the current USD/NGN exchange rate from the Chainlink feed.
+    /// @dev Derived by inverting the on-chain NGN/USD Chainlink price.
+    ///      Example: if NGN/USD = 0.00073480, then USD/NGN ≈ 1,360.9.
+    /// @return USD/NGN rate, normalized to 18 decimals (PRECISION).
+    function getUsdNgnRate() external view returns (uint256) {
+        return _getUsdNgnRate();
+    }
+
+    /// @notice Get the raw Asset/USD price for a market from the Pyth oracle.
+    /// @dev Useful for UIs that want to display the USD price independently of the FX rate.
+    /// @param _marketId The market to query.
+    /// @return Asset/USD price, normalized to 18 decimals (PRECISION).
+    function getAssetUsdPrice(bytes32 _marketId) external view returns (uint256) {
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        if (cfg.pythFeedId == bytes32(0)) revert MarketNotEnabled();
+        return _getPythPrice(cfg.pythFeedId, cfg.maxStaleness);
+    }
+
+    /// @notice Get the complete list of market IDs ever added to the protocol.
+    /// @dev Includes disabled markets. Use `marketConfigs[id].enabled` to filter.
+    /// @return Array of all market ID bytes32 values.
+    function getAllMarketIds() external view returns (bytes32[] memory) {
+        return marketIds;
+    }
+
+    /// @notice Get the full configuration for a market.
+    /// @dev Returns all fields of `MarketConfig` as a tuple (Solidity auto-generated
+    ///      getters for mappings of structs only return individual fields).
+    /// @param _marketId The market to query.
+    /// @return pythFeedId             Pyth Asset/USD feed ID.
+    /// @return maxStaleness           Max acceptable Pyth price age (seconds).
+    /// @return maxLeverage            Maximum leverage multiplier.
+    /// @return maintenanceMarginRatio Liquidation threshold (PRECISION).
+    /// @return maxOIMultiplier        OI cap relative to vault TVL (PRECISION).
+    /// @return marketType             Asset classification enum.
+    /// @return vault                  Address of the market's MarketVault.
+    /// @return enabled                Whether new positions can be opened.
+    function getMarketConfig(bytes32 _marketId)
+        external
+        view
+        returns (
+            bytes32 pythFeedId,
+            uint256 maxStaleness,
+            uint256 maxLeverage,
+            uint256 maintenanceMarginRatio,
+            uint256 maxOIMultiplier,
+            MarketType marketType,
+            address vault,
+            bool enabled
+        )
+    {
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        return (
+            cfg.pythFeedId,
+            cfg.maxStaleness,
+            cfg.maxLeverage,
+            cfg.maintenanceMarginRatio,
+            cfg.maxOIMultiplier,
+            cfg.marketType,
+            address(cfg.vault),
+            cfg.enabled
+        );
+    }
+
+    /// @notice Get a trader's current position equity in cNGN token precision.
+    /// @dev Equity = collateral (scaled to 18 dec) + rawPnL − funding, then converted
+    ///      back to 6 decimal token precision. Returns 0 if no position exists.
+    /// @param _marketId The market the position is in.
+    /// @param _trader   The trader's address.
+    /// @return Position equity in cNGN (6 decimals). Can be negative if underwater.
+    function getPositionEquity(bytes32 _marketId, address _trader) external view returns (int256) {
+        Position storage pos = positions[_marketId][_trader];
+        if (pos.size == 0) return int256(0);
+
+        uint256 markPrice = _getMarkPrice(_marketId);
+        int256 pnl = _calculatePnL(pos, markPrice);
+        int256 funding = _pendingFunding(_marketId, pos);
+        int256 netPnL = pnl - funding;
+
+        uint256 collateralScaled = _toInternalPrecision(pos.collateral);
+        int256 equity = int256(collateralScaled) + netPnL;
+        return _toTokenPnL(equity);
+    }
+
+    /// @notice Get the LP-available TVL of a market's vault.
+    /// @dev Returns `MarketVault.totalAssets()`, which accounts for trader collateral
+    ///      and unrealized PnL. See MarketVault for the full calculation.
+    /// @param _marketId The market to query.
+    /// @return LP-available assets in cNGN (6 decimals).
+    function getMarketVaultTVL(bytes32 _marketId) external view returns (uint256) {
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        if (address(cfg.vault) == address(0)) revert MarketNotEnabled();
+        return cfg.vault.totalAssets();
+    }
+
+    /// @notice Comprehensive market snapshot for LPs, traders, and front-ends.
+    /// @dev Aggregates configuration, live oracle pricing, open interest, vault liquidity,
+    ///      and trader count into a single struct. Eliminates the need for 6+ separate
+    ///      RPC calls to piece together market state.
+    ///
+    ///      May revert if oracle feeds are stale — callers should handle this gracefully
+    ///      (e.g. `try/catch` in front-ends or off-chain aggregators).
+    ///
+    ///      Gas cost: view function, free when called off-chain via `eth_call`.
+    ///
+    /// @param _marketId  The market to query (e.g. `keccak256("ETH-PERP")`).
+    /// @return info  A `MarketInfo` struct containing all relevant market data.
+    function getMarketInfo(bytes32 _marketId) external view returns (MarketInfo memory info) {
+        MarketConfig storage cfg = marketConfigs[_marketId];
+        if (cfg.pythFeedId == bytes32(0) && !cfg.enabled) revert MarketNotEnabled();
+
+        // Config
+        info.marketId = _marketId;
+        info.marketType = cfg.marketType;
+        info.maxLeverage = cfg.maxLeverage;
+        info.maintenanceMarginRatio = cfg.maintenanceMarginRatio;
+        info.maxOIMultiplier = cfg.maxOIMultiplier;
+        info.enabled = cfg.enabled;
+        info.vault = address(cfg.vault);
+
+        // Live pricing (may revert if feeds are stale — caller should handle)
+        info.markPriceCngn = _getMarkPrice(_marketId);
+        info.assetUsdPrice = _getPythPrice(cfg.pythFeedId, cfg.maxStaleness);
+        info.usdNgnRate = _getUsdNgnRate();
+
+        // Open interest
+        MarketOI storage moi = marketOI[_marketId];
+        info.longOI = moi.longOI;
+        info.shortOI = moi.shortOI;
+        info.fundingIndex = moi.fundingIndex;
+
+        // Vault & liquidity
+        info.vaultTVL = cfg.vault.totalAssets();
+        info.collateralHeld = marketCollateralHeld[_marketId];
+
+        // Unrealized PnL (token precision, 6 dec)
+        info.unrealizedPnL = _marketUnrealizedPnL(_marketId, info.markPriceCngn);
+
+        // Active traders
+        info.openTraderCount = tradersPerMarket[_marketId].length;
     }
 
     /*//////////////////////////////////////////////////////////////
                        PRECISION HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Convert raw cNGN token amount (asset decimals) to PRECISION (1e18).
-    ///         Assumes cNGN has 6 decimals; adjust if different.
+    /// @dev Scale a cNGN token amount (6 decimals) up to internal precision (18 decimals).
+    ///      Used when entering amounts into fixed-point math (PnL, equity, size).
     function _toInternalPrecision(uint256 _amount) internal pure returns (uint256) {
-        return _amount * 1e12; // 6 decimals → 18 decimals
+        return _amount * 1e12; // 6 dec → 18 dec
     }
 
-    /// @notice Convert from PRECISION (1e18) back to raw cNGN token amount.
+    /// @dev Scale an internal-precision amount (18 decimals) back to cNGN token precision (6 dec).
+    ///      Used when converting calculated values back to token amounts for transfers.
+    ///      Truncates (rounds down) — the protocol keeps any dust.
     function _fromInternalPrecision(uint256 _amount) internal pure returns (uint256) {
-        return _amount / 1e12; // 18 decimals → 6 decimals
+        return _amount / 1e12; // 18 dec → 6 dec
     }
 
-    /// @notice Convert PnL from internal precision (18 dec) to token precision (6 dec).
+    /// @dev Convert a signed PnL value from internal precision (18 dec) to token precision (6 dec).
+    ///      Handles the sign correctly: splits into abs value, scales down, re-applies sign.
     function _toTokenPnL(int256 _pnl) internal pure returns (int256) {
         if (_pnl >= 0) {
             return int256(_fromInternalPrecision(uint256(_pnl)));
@@ -663,42 +1350,65 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
                      TRADER SET MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Add a trader to an asset's trader set (idempotent).
-    function _addTrader(address _asset, address _trader) internal {
-        if (_traderIndex[_asset][_trader] != 0) return; // already tracked
-        tradersPerAsset[_asset].push(_trader);
-        _traderIndex[_asset][_trader] = tradersPerAsset[_asset].length; // store index+1
+    // The trader set is an unordered array + reverse-index pattern that supports:
+    //   - O(1) add (append + store index)
+    //   - O(1) remove (swap last element into removed slot + pop)
+    //   - O(n) iteration (for Automation's checkUpkeep scan)
+    //
+    // The `_traderIndex` mapping stores `arrayIndex + 1` so that 0 means "not present."
+
+    /// @dev Add a trader to the per-market set. No-op if already present.
+    function _addTrader(bytes32 _marketId, address _trader) internal {
+        if (_traderIndex[_marketId][_trader] != 0) return; // already tracked
+        tradersPerMarket[_marketId].push(_trader);
+        _traderIndex[_marketId][_trader] = tradersPerMarket[_marketId].length;
     }
 
-    /// @notice Remove a trader from an asset's trader set (swap-and-pop).
-    function _removeTrader(address _asset, address _trader) internal {
-        uint256 indexPlusOne = _traderIndex[_asset][_trader];
-        if (indexPlusOne == 0) return; // not tracked
+    /// @dev Remove a trader from the per-market set using swap-and-pop.
+    ///      The last element is moved into the removed slot to keep the array compact.
+    function _removeTrader(bytes32 _marketId, address _trader) internal {
+        uint256 indexPlusOne = _traderIndex[_marketId][_trader];
+        if (indexPlusOne == 0) return;
 
-        uint256 lastIndex = tradersPerAsset[_asset].length - 1;
+        uint256 lastIndex = tradersPerMarket[_marketId].length - 1;
         uint256 removeIndex = indexPlusOne - 1;
 
         if (removeIndex != lastIndex) {
-            address lastTrader = tradersPerAsset[_asset][lastIndex];
-            tradersPerAsset[_asset][removeIndex] = lastTrader;
-            _traderIndex[_asset][lastTrader] = indexPlusOne;
+            address lastTrader = tradersPerMarket[_marketId][lastIndex];
+            tradersPerMarket[_marketId][removeIndex] = lastTrader;
+            _traderIndex[_marketId][lastTrader] = indexPlusOne;
         }
 
-        tradersPerAsset[_asset].pop();
-        delete _traderIndex[_asset][_trader];
+        tradersPerMarket[_marketId].pop();
+        delete _traderIndex[_marketId][_trader];
     }
 
-    /// @notice Get the count of traders with open positions on an asset.
-    function tradersPerAssetLength(address _asset) external view returns (uint256) {
-        return tradersPerAsset[_asset].length;
+    /// @notice Get the number of traders with open positions in a market.
+    /// @param _marketId The market to query.
+    /// @return Number of unique addresses with open positions.
+    function tradersPerMarketLength(bytes32 _marketId) external view returns (uint256) {
+        return tradersPerMarket[_marketId].length;
     }
 
     /*//////////////////////////////////////////////////////////////
                    CHAINLINK AUTOMATION 2.1
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Called off-chain by Chainlink Automation nodes to detect liquidatable positions.
-    ///         Returns up to MAX_LIQUIDATION_BATCH (asset, trader) pairs.
+    /// @notice Off-chain check called by Chainlink Automation nodes to discover liquidatable
+    ///         positions across all markets.
+    /// @dev Implements `AutomationCompatibleInterface.checkUpkeep()`. Runs as a `view`
+    ///      call (no gas cost). Iterates through all markets and their open positions to
+    ///      find up to `MAX_LIQUIDATION_BATCH` (10) liquidatable positions.
+    ///
+    ///      Design choices:
+    ///        - Uses `try/catch` on `getMarkPrice()` so that markets with stale Pyth prices
+    ///          are silently skipped rather than reverting the entire check.
+    ///        - Pre-allocates fixed-size arrays, then trims to actual count before encoding.
+    ///        - `performData` is ABI-encoded `(bytes32[] markets, address[] traders)`.
+    ///
+    /// @param /* checkData */ Unused. Chainlink passes this from the upkeep registration config.
+    /// @return upkeepNeeded  True if at least one position is liquidatable.
+    /// @return performData   ABI-encoded arrays of (marketIds, traderAddresses) to liquidate.
     function checkUpkeep(
         bytes calldata /* checkData */
     )
@@ -707,34 +1417,42 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         override
         returns (bool upkeepNeeded, bytes memory performData)
     {
-        address[] memory assets = new address[](MAX_LIQUIDATION_BATCH);
+        bytes32[] memory markets = new bytes32[](MAX_LIQUIDATION_BATCH);
         address[] memory traders = new address[](MAX_LIQUIDATION_BATCH);
         uint256 count;
 
-        for (uint256 i = 0; i < supportedAssets.length && count < MAX_LIQUIDATION_BATCH; i++) {
-            address asset = supportedAssets[i];
-            MarketOI storage moi = marketOI[asset];
+        for (uint256 i = 0; i < marketIds.length && count < MAX_LIQUIDATION_BATCH; i++) {
+            bytes32 mid = marketIds[i];
+            MarketOI storage moi = marketOI[mid];
             if (moi.longOI == 0 && moi.shortOI == 0) continue;
 
-            uint256 markPrice = _getMarkPrice(asset);
-            uint256 traderCount = tradersPerAsset[asset].length;
+            // Try to get price; skip market if stale
+            uint256 markPrice;
+            try this.getMarkPrice(mid) returns (uint256 p) {
+                markPrice = p;
+            } catch {
+                continue;
+            }
+
+            MarketConfig storage cfg = marketConfigs[mid];
+            uint256 traderCount = tradersPerMarket[mid].length;
 
             for (uint256 j = 0; j < traderCount && count < MAX_LIQUIDATION_BATCH; j++) {
-                address trader = tradersPerAsset[asset][j];
-                Position storage pos = positions[asset][trader];
+                address trader = tradersPerMarket[mid][j];
+                Position storage pos = positions[mid][trader];
                 if (pos.size == 0) continue;
 
                 int256 pnl = _calculatePnL(pos, markPrice);
-                int256 funding = _pendingFunding(asset, pos);
+                int256 funding = _pendingFunding(mid, pos);
                 int256 netPnL = pnl - funding;
 
                 uint256 collateralScaled = _toInternalPrecision(pos.collateral);
                 int256 equity = int256(collateralScaled) + netPnL;
 
-                bool liquidatable = equity < 0 || uint256(equity) * PRECISION < MAINTENANCE_MARGIN_RATIO * pos.size;
+                bool liquidatable = equity < 0 || uint256(equity) * PRECISION < cfg.maintenanceMarginRatio * pos.size;
 
                 if (liquidatable) {
-                    assets[count] = asset;
+                    markets[count] = mid;
                     traders[count] = trader;
                     count++;
                 }
@@ -742,92 +1460,71 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         }
 
         if (count > 0) {
-            // Trim arrays to actual count
-            address[] memory trimmedAssets = new address[](count);
+            bytes32[] memory trimmedMarkets = new bytes32[](count);
             address[] memory trimmedTraders = new address[](count);
             for (uint256 k = 0; k < count; k++) {
-                trimmedAssets[k] = assets[k];
+                trimmedMarkets[k] = markets[k];
                 trimmedTraders[k] = traders[k];
             }
             upkeepNeeded = true;
-            performData = abi.encode(trimmedAssets, trimmedTraders);
+            performData = abi.encode(trimmedMarkets, trimmedTraders);
         }
     }
 
-    /// @notice Called by Chainlink Automation forwarder to execute batched liquidations.
-    ///         Each liquidation is wrapped in a conditional check for resilience.
+    /// @notice Execute batched liquidations as identified by `checkUpkeep()`.
+    /// @dev Implements `AutomationCompatibleInterface.performUpkeep()`. Only callable by
+    ///      the registered Chainlink Automation forwarder (`liquidationForwarder`).
+    ///
+    ///      Optimizations:
+    ///        - Caches the mark price per market so consecutive positions in the same
+    ///          market don't trigger redundant oracle reads.
+    ///        - Re-validates liquidation eligibility before executing (the position may
+    ///          have been closed or the price may have moved since `checkUpkeep()`).
+    ///        - Bounties from automated liquidations stay in the vault as protocol yield
+    ///          (see `_closePosition` for the `isProtocolLiquidation` logic).
+    ///
+    /// @param performData ABI-encoded `(bytes32[] markets, address[] traders)` from `checkUpkeep`.
     function performUpkeep(bytes calldata performData) external override nonReentrant whenNotPaused {
         if (msg.sender != liquidationForwarder) revert OnlyForwarder();
 
-        (address[] memory assets, address[] memory traders) = abi.decode(performData, (address[], address[]));
+        (bytes32[] memory markets, address[] memory traders) = abi.decode(performData, (bytes32[], address[]));
 
-        // Cache mark prices per unique asset for gas efficiency
-        address lastAsset;
+        // Cache mark price per market — only re-fetch when the market changes
+        bytes32 lastMarket;
         uint256 cachedMarkPrice;
-        bool fundingUpdated;
 
-        for (uint256 i = 0; i < assets.length; i++) {
-            address asset = assets[i];
+        for (uint256 i = 0; i < markets.length; i++) {
+            bytes32 mid = markets[i];
             address trader = traders[i];
 
-            // Refresh cache when asset changes
-            if (asset != lastAsset) {
-                lastAsset = asset;
-                _updateFunding(asset);
-                cachedMarkPrice = _getMarkPrice(asset);
-                fundingUpdated = true;
+            // Re-fetch price and update funding only when switching to a new market
+            if (mid != lastMarket) {
+                lastMarket = mid;
+                _updateFunding(mid);
+                cachedMarkPrice = _getMarkPrice(mid);
             }
 
-            // Resilient: skip if position was already closed or is now healthy
-            Position storage pos = positions[asset][trader];
-            if (pos.size == 0) continue;
+            Position storage pos = positions[mid][trader];
+            if (pos.size == 0) continue; // Position may have been closed since checkUpkeep
 
+            // Re-validate liquidation: price may have moved favorably since check
+            MarketConfig storage cfg = marketConfigs[mid];
             int256 pnl = _calculatePnL(pos, cachedMarkPrice);
-            int256 funding = _pendingFunding(asset, pos);
+            int256 funding = _pendingFunding(mid, pos);
             int256 netPnL = pnl - funding;
 
             uint256 collateralScaled = _toInternalPrecision(pos.collateral);
             int256 equity = int256(collateralScaled) + netPnL;
 
-            bool stillLiquidatable = equity < 0 || uint256(equity) * PRECISION < MAINTENANCE_MARGIN_RATIO * pos.size;
+            bool stillLiquidatable = equity < 0 || uint256(equity) * PRECISION < cfg.maintenanceMarginRatio * pos.size;
 
-            if (!stillLiquidatable) continue;
+            if (!stillLiquidatable) continue; // No longer liquidatable — skip
 
-            // Execute liquidation — forwarder is the liquidator (yield capture)
-            _closePosition(asset, trader, true, liquidationForwarder);
+            _closePosition(mid, trader, true, liquidationForwarder);
         }
     }
 
-    /*//////////////////////////////////////////////////////////////
-                    GLOBAL UNREALIZED PNL
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Calculate total unrealized PnL across all markets (in token precision, 6 dec).
-    ///         Positive = traders are net profitable; negative = traders are net losing.
-    ///         Used by the vault to compute LP share price in real-time.
-    function getGlobalUnrealizedPnL() external view returns (int256) {
-        int256 totalPnL;
-        for (uint256 i = 0; i < supportedAssets.length; i++) {
-            address asset = supportedAssets[i];
-            MarketOI storage moi = marketOI[asset];
-
-            if (moi.longOI == 0 && moi.shortOI == 0) continue;
-
-            uint256 markPrice = _getMarkPrice(asset);
-
-            // Long unrealized PnL: longOI * (markPrice - avgLongPrice) / avgLongPrice
-            if (moi.longOI > 0 && moi.avgLongPrice > 0) {
-                int256 priceDelta = int256(markPrice) - int256(moi.avgLongPrice);
-                totalPnL += int256(moi.longOI) * priceDelta / int256(moi.avgLongPrice);
-            }
-
-            // Short unrealized PnL: shortOI * (avgShortPrice - markPrice) / avgShortPrice
-            if (moi.shortOI > 0 && moi.avgShortPrice > 0) {
-                int256 priceDelta = int256(moi.avgShortPrice) - int256(markPrice);
-                totalPnL += int256(moi.shortOI) * priceDelta / int256(moi.avgShortPrice);
-            }
-        }
-        // Convert from internal precision to token precision
-        return _toTokenPnL(totalPnL);
-    }
+    /// @notice Allows the contract to receive ETH, required for paying Pyth update fees
+    ///         and receiving refunds from `updatePythPrices()`.
+    receive() external payable {}
 }

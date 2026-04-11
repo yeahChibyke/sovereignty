@@ -1,0 +1,28 @@
+{
+  "name": "sovereignty",
+  "version": "1.0.0",
+  "description": "A high-performance, fully on-chain Perpetual Futures Decentralized Exchange (DEX). The platform allows users to trade crypto assets with up to 5x leverage, using **cNGN (a fiat-pegged stablecoin)** as the base margin and settlement currency.",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yeahChibyke/sovereignty.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/yeahChibyke/sovereignty/issues"
+  },
+  "homepage": "https://github.com/yeahChibyke/sovereignty#readme",
+  "dependencies": {
+    "@pythnetwork/pyth-sdk-solidity": "^4.3.1"
+  }
+}
