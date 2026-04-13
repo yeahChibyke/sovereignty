@@ -140,7 +140,7 @@ abstract contract BaseForkSetup is Test {
     ///      set forwarder → deal cNGN → seed LP liquidity → approve PerpDEX → fund ETH.
     function setUp() public virtual {
         // 1. Fork Base mainnet
-        baseFork = vm.createSelectFork(vm.rpcUrl("base"));
+        baseFork = vm.createSelectFork(vm.envString("RPC_URL"));
 
         // 2. Reference real contracts
         cNGN = IERC20(CNGN_ADDRESS);
