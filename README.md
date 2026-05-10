@@ -173,7 +173,7 @@ Run only fork tests:
 forge test -vv --ffi --match-path "test/fork/*"
 ```
 
-### Deployment
+<!-- ### Deployment
 Deployment is a two-step process:
 
 **Step 1 — Deploy the SovereigntyAccessManager (UUPS proxy):**
@@ -190,5 +190,5 @@ forge script script/DeployPerpDEX.s.sol:DeployPerpDEX \
   --rpc-url $BASE_RPC --broadcast --verify
 ```
 
-> **Note:** Base mainnet addresses (cNGN, Pyth, Chainlink NGN/USD) and all 11 Pyth feed IDs are hardcoded in the deployment script. The deployer must hold `MARKET_MANAGER_ROLE` and `VAULT_MANAGER_ROLE` on the SAM proxy.
+> **Note:** Base mainnet addresses (cNGN, Pyth, Chainlink NGN/USD) and all 11 Pyth feed IDs are hardcoded in the deployment script. The deployer must hold `MARKET_MANAGER_ROLE` and `VAULT_MANAGER_ROLE` on the SAM proxy. -->
 

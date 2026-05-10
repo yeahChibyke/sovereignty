@@ -5,6 +5,13 @@ libs = ["lib", "node_modules"]
 via_ir = true
 ffi = true
 
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@chainlink/=lib/chainlink-evm/",
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "@pythnetwork/pyth-sdk-solidity/=node_modules/@pythnetwork/pyth-sdk-solidity/",
+]
+
 [lint]
 exclude_lints = [
     "screaming-snake-case-const",
@@ -19,13 +26,7 @@ exclude_lints = [
     "unwrapped-modifier-logic",
     "named-struct-fields",
     "unsafe-cheatcode",
-]
-
-remappings = [
-    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-    "@chainlink/=lib/chainlink-evm/",
-    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
-    "@pythnetwork/pyth-sdk-solidity/=node_modules/@pythnetwork/pyth-sdk-solidity/",
+    "block-timestamp",
 ]
 
 [rpc_endpoints]
