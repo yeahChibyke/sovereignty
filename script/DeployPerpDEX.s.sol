@@ -14,14 +14,18 @@ import {SovereigntyAccessManager} from "../src/SovereigntyAccessManager.sol";
 ///      ERC4626 MarketVault for each, and configuring SAM function-level access control.
 ///
 ///      Deployment flow:
-///        1. Deploy PerpDEX (constructor: cNGN, Pyth, Chainlink NGN/USD, staleness, SAM).
+///        1. Deploy PerpDEX (constructor: cNGN, Pyth, Chainlink NGN/USD, staleness, SAM, sequencer feed).
 ///        2. Define all 11 markets via `_defineMarkets()` with per-category parameters.
 ///        3. For each market: deploy MarketVault → link vault to PerpDEX → add market to PerpDEX.
-///        4. Configure SAM function roles for PerpDEX (MARKET_MANAGER, OPERATOR, PAUSER).
+///        4. Configure SAM function roles for PerpDEX (MARKET_MANAGER, OPERATOR, PAUSER) and for
+///           each MarketVault (VAULT_MANAGER on setPerpDex / setWithdrawalCooldown).
 ///
 ///      Required environment variables:
 ///        SAM_PROXY            — deployed SovereigntyAccessManager proxy address.
-///        DEPLOYER_PRIVATE_KEY — wallet that broadcasts (must hold MARKET_MANAGER + VAULT_MANAGER roles).
+///        DEPLOYER_PRIVATE_KEY — wallet that broadcasts. Must hold ADMIN_ROLE on the SAM proxy:
+///                               `setTargetFunctionRole` is admin-gated, and the initial
+///                               `setPerpDex`/`addMarket` calls run on the ADMIN_ROLE default
+///                               before per-function roles are assigned.
 ///
 ///      Hardcoded Base mainnet addresses:
 ///        cNGN             = 0x46C85152bFe9f96829aA94755D9f915F9B10EF5F (6 decimals)
@@ -44,6 +48,11 @@ contract DeployPerpDEX is Script {
     /// @dev Chainlink NGN/USD price feed on Base (8 decimals).
     ///      Inverted on-chain to produce USD/NGN for price triangulation.
     address constant NGN_USD_CHAINLINK = 0xdfbb5Cbc88E382de007bfe6CE99C388176ED80aD;
+
+    /// @dev Chainlink L2 Sequencer Uptime feed on Base. Checked before consuming the Chainlink
+    ///      NGN/USD price so trades/liquidations are rejected during sequencer downtime and the
+    ///      grace window after recovery.
+    address constant SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
 
     /// @dev Maximum age (in seconds) for the Chainlink NGN/USD answer.
     ///      Set to 1 hour — Chainlink forex feeds update on a heartbeat schedule.
@@ -111,8 +120,18 @@ contract DeployPerpDEX is Script {
     uint256 constant MAINTENANCE_MARGIN = 2e16;
 
     /// @dev Open interest cap multiplier — 5× vault TVL. Maximum total OI per
-    ///      market is `vaultTVL * OI_MULTIPLIER / 1e18`.
+    ///      market is `min(MAX_OPEN_INTEREST, vaultTVL * OI_MULTIPLIER / 1e18)`.
     uint256 constant OI_MULTIPLIER = 5e18;
+
+    /// @dev Absolute open-interest ceiling per market (PRECISION cNGN), independent of vault TVL.
+    ///      A hard bound that transient/flash LP liquidity cannot lift. Governance-tunable via
+    ///      `updateMarketParams`. Placeholder: 50,000,000,000 cNGN (~$31M at ~1600 NGN/USD).
+    uint256 constant MAX_OPEN_INTEREST = 50_000_000_000e18;
+
+    /// @dev LP withdrawal cooldown — seconds between `requestRedeem` and `claimRedeem` on each
+    ///      MarketVault. Makes LP liquidity sticky (no flash OI-cap inflation) and lets exits
+    ///      during oracle downtime settle on recovery at a fresh price. Governance-tunable.
+    uint256 constant WITHDRAWAL_COOLDOWN = 1 days;
 
     /*//////////////////////////////////////////////////////////////
                         MARKET DEFINITION
@@ -145,26 +164,37 @@ contract DeployPerpDEX is Script {
     /// @dev Steps:
     ///      1. Deploy PerpDEX with oracle and SAM references.
     ///      2. Build market definitions via `_defineMarkets()`.
-    ///      3. For each market: deploy MarketVault → link to PerpDEX → register market.
-    ///      4. Bind SAM function-level roles: MARKET_MANAGER, OPERATOR, PAUSER.
+    ///      3. For each market: deploy MarketVault → link to PerpDEX → register market
+    ///         (performed under the ADMIN_ROLE default before per-function roles are bound).
+    ///      4. Bind SAM function-level roles: MARKET_MANAGER, OPERATOR, PAUSER on PerpDEX and
+    ///         VAULT_MANAGER on every MarketVault's `setPerpDex`.
     function run() external {
         address samProxy = vm.envAddress("SAM_PROXY");
 
         vm.startBroadcast();
 
+        // NOTE ON ROLES: this script must be broadcast by an account holding ADMIN_ROLE on the
+        // SAM proxy, because `setTargetFunctionRole` is admin-gated. The initial setup calls
+        // below (`vault.setPerpDex`, `perp.addMarket`) run while those functions are still on
+        // the ADMIN_ROLE default, so the admin deployer can perform them. Role bindings are
+        // applied afterwards so that all subsequent operational calls require the dedicated
+        // MARKET_MANAGER / VAULT_MANAGER / OPERATOR / PAUSER roles (least privilege).
+
         // 1. Deploy PerpDEX
-        PerpDEX perp = new PerpDEX(CNGN, PYTH, NGN_USD_CHAINLINK, USD_NGN_STALENESS, samProxy);
+        PerpDEX perp = new PerpDEX(CNGN, PYTH, NGN_USD_CHAINLINK, USD_NGN_STALENESS, samProxy, SEQUENCER_UPTIME_FEED);
         console.log("PerpDEX deployed at:", address(perp));
 
         // 2. Define all markets
         MarketDef[] memory markets = _defineMarkets();
 
-        // 3. Deploy vaults and add markets
+        // 3. Deploy vaults, link to PerpDEX, and register markets (under ADMIN_ROLE default)
+        address[] memory vaults = new address[](markets.length);
         for (uint256 i = 0; i < markets.length; i++) {
             MarketDef memory m = markets[i];
 
-            // Deploy vault
-            MarketVault vault = new MarketVault(IERC20(CNGN), samProxy, m.marketId, m.shareName, m.shareSymbol);
+            MarketVault vault =
+                new MarketVault(IERC20(CNGN), samProxy, m.marketId, m.shareName, m.shareSymbol, WITHDRAWAL_COOLDOWN);
+            vaults[i] = address(vault);
             console.log(string.concat("Vault ", m.shareSymbol, " deployed at:"), address(vault));
 
             // Link vault to PerpDEX
@@ -178,12 +208,13 @@ contract DeployPerpDEX is Script {
                 m.maxLeverage,
                 MAINTENANCE_MARGIN,
                 OI_MULTIPLIER,
+                MAX_OPEN_INTEREST,
                 m.marketType,
                 address(vault)
             );
         }
 
-        // 4. Configure SAM roles for PerpDEX and all vaults
+        // 4. Configure SAM function roles for PerpDEX and all vaults
         SovereigntyAccessManager sam = SovereigntyAccessManager(samProxy);
 
         // PerpDEX: market manager selectors
@@ -194,10 +225,11 @@ contract DeployPerpDEX is Script {
         sam.setTargetFunctionRole(address(perp), marketMgrSels, sam.MARKET_MANAGER_ROLE());
 
         // PerpDEX: operator selectors
-        bytes4[] memory operatorSels = new bytes4[](3);
+        bytes4[] memory operatorSels = new bytes4[](4);
         operatorSels[0] = PerpDEX.setUsdNgnFeed.selector;
         operatorSels[1] = PerpDEX.setForwarder.selector;
-        operatorSels[2] = PerpDEX.unpause.selector;
+        operatorSels[2] = PerpDEX.disableForwarder.selector;
+        operatorSels[3] = PerpDEX.unpause.selector;
         sam.setTargetFunctionRole(address(perp), operatorSels, sam.OPERATOR_ROLE());
 
         // PerpDEX: pauser selectors
@@ -205,7 +237,17 @@ contract DeployPerpDEX is Script {
         pauserSels[0] = PerpDEX.pause.selector;
         sam.setTargetFunctionRole(address(perp), pauserSels, sam.PAUSER_ROLE());
 
-        console.log("SAM function roles configured for PerpDEX");
+        // MarketVault: bind setPerpDex() and setWithdrawalCooldown() on every vault to
+        // VAULT_MANAGER_ROLE so vault relinking and cooldown tuning are vault-manager operations
+        // rather than remaining on the ADMIN default.
+        bytes4[] memory vaultMgrSels = new bytes4[](2);
+        vaultMgrSels[0] = MarketVault.setPerpDex.selector;
+        vaultMgrSels[1] = MarketVault.setWithdrawalCooldown.selector;
+        for (uint256 i = 0; i < vaults.length; i++) {
+            sam.setTargetFunctionRole(vaults[i], vaultMgrSels, sam.VAULT_MANAGER_ROLE());
+        }
+
+        console.log("SAM function roles configured for PerpDEX and all vaults");
 
         vm.stopBroadcast();
     }

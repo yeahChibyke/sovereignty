@@ -13,7 +13,12 @@ import {AccessManaged} from "@openzeppelin/contracts/access/manager/AccessManage
 interface IMarketPerpDEX {
     /// @notice Net unrealized PnL of all open positions in a market (token precision, 6 dec).
     ///         Positive = traders are winning (vault liability), negative = traders are losing (vault asset).
+    ///         Reverts if the live oracle is stale and there is open interest.
     function getMarketUnrealizedPnL(bytes32 marketId) external view returns (int256);
+
+    /// @notice Oracle-independent fallback for {getMarketUnrealizedPnL} using the last cached
+    ///         mark price. Never reverts on a stale feed.
+    function getMarketUnrealizedPnLSafe(bytes32 marketId) external view returns (int256);
 
     /// @notice Total collateral deposited by traders for a given market (token precision, 6 dec).
     ///         This collateral is held inside the vault's token balance but belongs to traders,
@@ -42,14 +47,16 @@ interface IMarketPerpDEX {
 ///
 ///      PnL settlement flow:
 ///        - When a trader closes a position, PerpDEX calls `settlePnL()` to record the
-///          realized PnL, then `payTrader()` or `receiveFromTrader()` to move tokens.
+///          realized PnL, then `payTrader()` to move tokens out (trader collateral is pulled in
+///          directly by PerpDEX via `safeTransferFrom`, so the vault has no pull function).
 ///        - `globalTraderPnL` is a running tally used as a fallback before PerpDEX is linked.
 ///
 ///      Access control:
 ///        - `setPerpDex()` is gated by `SovereigntyAccessManager` (VAULT_MANAGER_ROLE).
-///        - Settlement functions (`settlePnL`, `payTrader`, `receiveFromTrader`) are gated
-///          by the `onlyPerpDex` modifier — only the linked PerpDEX can call them.
-///        - LP deposit/withdraw (inherited ERC4626) are permissionless.
+///        - Settlement functions (`settlePnL`, `payTrader`) are gated by the `onlyPerpDex`
+///          modifier — only the linked PerpDEX can call them.
+///        - LP deposits/mints are permissionless (fresh-price gated). LP exits use a two-step
+///          `requestRedeem` → `claimRedeem` cooldown; instant ERC4626 `withdraw`/`redeem` revert.
 contract MarketVault is ERC4626, AccessManaged {
     using SafeERC20 for IERC20;
     using Math for uint256;
@@ -74,6 +81,27 @@ contract MarketVault is ERC4626, AccessManaged {
     ///      Used as a fallback in `totalAssets()` when PerpDEX is not yet linked.
     int256 public globalTraderPnL;
 
+    /// @notice Cooldown (seconds) an LP must wait between requesting and claiming a withdrawal.
+    /// @dev Makes LP liquidity sticky: it cannot be deposited and pulled within the same window
+    ///      (defeating flash/transient OI-cap inflation), and a request placed during oracle
+    ///      downtime simply claims on recovery at a FRESH price (no permanent freeze, no stale
+    ///      exit). Governance-tunable via `setWithdrawalCooldown`.
+    uint256 public withdrawalCooldown;
+
+    /// @notice A pending LP withdrawal request. One per owner at a time.
+    /// @param shares      Vault shares escrowed in this contract for the request.
+    /// @param claimableAt Earliest timestamp `claimRedeem()` may execute.
+    struct WithdrawalRequest {
+        uint256 shares;
+        uint256 claimableAt;
+    }
+
+    /// @notice Pending withdrawal request per LP. `shares == 0` means no active request.
+    mapping(address => WithdrawalRequest) public withdrawalRequests;
+
+    /// @notice Total shares currently escrowed across all pending withdrawal requests.
+    uint256 public totalPendingWithdrawalShares;
+
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -83,6 +111,25 @@ contract MarketVault is ERC4626, AccessManaged {
 
     /// @dev Thrown when attempting to set `perpDex` to the zero address.
     error ZeroAddress();
+
+    /// @dev Thrown when instant ERC4626 `withdraw`/`redeem` is called — use the request flow.
+    error UseRequestRedeem();
+
+    /// @dev Thrown when `claimRedeem`/`cancelRedeem` is called with no active request.
+    error NoWithdrawalRequest();
+
+    /// @dev Thrown when `requestRedeem` is called while a request is already pending.
+    error WithdrawalAlreadyPending();
+
+    /// @dev Thrown when `claimRedeem` is called before the cooldown has elapsed.
+    error CooldownNotElapsed();
+
+    /// @dev Thrown when `requestRedeem` is called with zero shares.
+    error ZeroShares();
+
+    /// @dev Thrown when a deposit/mint is attempted while the vault is insolvent (NAV clamped to
+    ///      0 with shares outstanding) — would mint value-free shares.
+    error VaultInsolvent();
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
@@ -97,6 +144,18 @@ contract MarketVault is ERC4626, AccessManaged {
     /// @param newGlobalTraderPnL Updated cumulative trader PnL after this settlement.
     event PnLSettled(int256 pnl, int256 newGlobalTraderPnL);
 
+    /// @notice Emitted when an LP requests a withdrawal (shares escrowed, cooldown started).
+    event WithdrawalRequested(address indexed owner, uint256 shares, uint256 claimableAt);
+
+    /// @notice Emitted when an LP claims a matured withdrawal request.
+    event WithdrawalClaimed(address indexed owner, uint256 shares, uint256 assets);
+
+    /// @notice Emitted when an LP cancels a pending withdrawal request (shares returned).
+    event WithdrawalCancelled(address indexed owner, uint256 shares);
+
+    /// @notice Emitted when the withdrawal cooldown is changed.
+    event WithdrawalCooldownSet(uint256 cooldown);
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -109,14 +168,26 @@ contract MarketVault is ERC4626, AccessManaged {
     /// @param _marketId       Unique identifier for the market this vault underwrites.
     /// @param _shareName      ERC20 name for the vault's share token (e.g. "cNGN Vault Share - ETH").
     /// @param _shareSymbol    ERC20 symbol for the vault's share token (e.g. "vcNGN-ETH").
+    /// @param _withdrawalCooldown Seconds an LP must wait between `requestRedeem` and `claimRedeem`.
     constructor(
         IERC20 _cNGN,
         address _accessManager,
         bytes32 _marketId,
         string memory _shareName,
-        string memory _shareSymbol
+        string memory _shareSymbol,
+        uint256 _withdrawalCooldown
     ) ERC4626(_cNGN) ERC20(_shareName, _shareSymbol) AccessManaged(_accessManager) {
         marketId = _marketId;
+        withdrawalCooldown = _withdrawalCooldown;
+    }
+
+    /// @notice Update the LP withdrawal cooldown.
+    /// @dev Restricted via SovereigntyAccessManager (VAULT_MANAGER_ROLE). Applies to requests
+    ///      made after the change; already-pending requests keep their original `claimableAt`.
+    /// @param _withdrawalCooldown New cooldown in seconds.
+    function setWithdrawalCooldown(uint256 _withdrawalCooldown) external restricted {
+        withdrawalCooldown = _withdrawalCooldown;
+        emit WithdrawalCooldownSet(_withdrawalCooldown);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -124,7 +195,7 @@ contract MarketVault is ERC4626, AccessManaged {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev Restricts function access to the linked PerpDEX contract.
-    ///      Used by `settlePnL`, `payTrader`, and `receiveFromTrader`.
+    ///      Used by `settlePnL` and `payTrader`.
     modifier onlyPerpDex() {
         if (msg.sender != perpDex) revert OnlyPerpDex();
         _;
@@ -146,7 +217,7 @@ contract MarketVault is ERC4626, AccessManaged {
 
     /// @notice Records a trader's realized PnL in the vault's running tally.
     /// @dev Called by PerpDEX when a position is closed or liquidated. The actual token
-    ///      movement happens separately via `payTrader()` / `receiveFromTrader()`.
+    ///      movement happens separately via `payTrader()`.
     ///      This function only updates the accounting (`globalTraderPnL`).
     /// @param _pnl The realized PnL in cNGN token precision (6 decimals).
     ///             Positive = trader profited (vault cost), negative = trader lost (vault gain).
@@ -162,15 +233,6 @@ contract MarketVault is ERC4626, AccessManaged {
     /// @param _amount The amount of cNGN to transfer (token precision, 6 decimals).
     function payTrader(address _to, uint256 _amount) external onlyPerpDex {
         IERC20(asset()).safeTransfer(_to, _amount);
-    }
-
-    /// @notice Pulls cNGN from a sender into the vault.
-    /// @dev Used by PerpDEX when a trader deposits collateral to open a position.
-    ///      Requires prior ERC20 approval from `_from` to this vault.
-    /// @param _from   The address to pull tokens from (must have approved this vault).
-    /// @param _amount The amount of cNGN to pull (token precision, 6 decimals).
-    function receiveFromTrader(address _from, uint256 _amount) external onlyPerpDex {
-        IERC20(asset()).safeTransferFrom(_from, address(this), _amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -203,9 +265,19 @@ contract MarketVault is ERC4626, AccessManaged {
 
         address _perpDex = perpDex;
         if (_perpDex != address(0) && _perpDex.code.length > 0) {
-            // Primary path: query PerpDEX for live collateral & unrealized PnL data
             uint256 collateralHeld = IMarketPerpDEX(_perpDex).marketCollateralHeld(marketId);
-            int256 unrealizedPnL = IMarketPerpDEX(_perpDex).getMarketUnrealizedPnL(marketId);
+
+            // Primary path: live unrealized PnL. If the oracle is stale this reverts, so we fall
+            // back to the cached-price variant so this VIEW (previews/getters) keeps working.
+            // NOTE: this fallback does NOT make value-moving LP actions available during downtime —
+            // deposit/mint/withdraw/redeem all call `_requireFreshPricing()` and revert when the
+            // feed is stale and open interest exists, so no one enters OR exits at a stale price.
+            int256 unrealizedPnL;
+            try IMarketPerpDEX(_perpDex).getMarketUnrealizedPnL(marketId) returns (int256 live) {
+                unrealizedPnL = live;
+            } catch {
+                unrealizedPnL = IMarketPerpDEX(_perpDex).getMarketUnrealizedPnLSafe(marketId);
+            }
 
             // LP assets = total balance − trader collateral − unrealized trader profit
             int256 lpAssets = int256(balance) - int256(collateralHeld) - unrealizedPnL;
@@ -221,5 +293,122 @@ contract MarketVault is ERC4626, AccessManaged {
             // Traders collectively lost → their losses are LP gains
             return balance + uint256(-globalTraderPnL);
         }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     LP ENTRY/EXIT GUARD (FRESH PRICING)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Require a fresh oracle before any value-moving LP action (deposit/mint/withdraw/redeem)
+    ///      while the market has open interest. `totalAssets()` falls back to a cached price during
+    ///      oracle downtime so read-only callers (previews, getters) don't revert, but actually
+    ///      MOVING value at a stale share price is unsafe in BOTH directions: a stale price lets an
+    ///      entrant buy in cheap OR an exiter redeem rich. Gating both sides closes that asymmetry.
+    ///      No-op before PerpDEX is linked, or when the market has no open interest (no oracle
+    ///      dependency — `getMarketUnrealizedPnL` returns 0 without reading a feed), so LPs can
+    ///      always enter/exit a market that holds no positions, even during an outage.
+    function _requireFreshPricing() internal view {
+        address _perpDex = perpDex;
+        if (_perpDex != address(0) && _perpDex.code.length > 0) {
+            // Reverts if there is open interest and the live oracle is stale.
+            IMarketPerpDEX(_perpDex).getMarketUnrealizedPnL(marketId);
+        }
+    }
+
+    /// @dev Block new LP capital while the vault is economically insolvent — i.e. `totalAssets()`
+    ///      has clamped to 0 (LP-available assets ≤ 0 because traders are deeply in profit) while
+    ///      shares are still outstanding. With ERC4626's `+1` virtual offset, depositing against a
+    ///      zero NAV would mint ~`totalSupply` shares per asset-wei (value-free), letting a depositor
+    ///      capture pre-existing LP capital once the NAV recovers. Reverting here closes that.
+    function _requireSolvent() internal view {
+        if (totalSupply() > 0 && totalAssets() == 0) revert VaultInsolvent();
+    }
+
+    /// @inheritdoc ERC4626
+    function deposit(uint256 assets, address receiver) public override returns (uint256) {
+        _requireFreshPricing();
+        _requireSolvent();
+        return super.deposit(assets, receiver);
+    }
+
+    /// @inheritdoc ERC4626
+    function mint(uint256 shares, address receiver) public override returns (uint256) {
+        _requireFreshPricing();
+        _requireSolvent();
+        return super.mint(shares, receiver);
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev Instant withdrawal is disabled — LP exits go through the `requestRedeem`/`claimRedeem`
+    ///      cooldown flow (see `requestRedeem`). This is standard for perp LP vaults (GLP/GM/HLP).
+    function withdraw(uint256, address, address) public pure override returns (uint256) {
+        revert UseRequestRedeem();
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev Instant redemption is disabled — use `requestRedeem`/`claimRedeem`.
+    function redeem(uint256, address, address) public pure override returns (uint256) {
+        revert UseRequestRedeem();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                     LP WITHDRAWAL COOLDOWN (REQUEST → CLAIM)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Step 1 of LP exit: escrow `shares` and start the withdrawal cooldown.
+    /// @dev The shares are transferred into the vault and held until `claimRedeem` (matured) or
+    ///      `cancelRedeem`. They remain part of `totalSupply` (so per-share NAV is unaffected) and
+    ///      still earn/bear PnL until claimed — the LP exits at the claim-time NAV, not now. Only
+    ///      one request per owner at a time. No price oracle is consulted here (price-agnostic).
+    /// @param shares Amount of vault shares to queue for withdrawal.
+    function requestRedeem(uint256 shares) external {
+        if (shares == 0) revert ZeroShares();
+        if (withdrawalRequests[msg.sender].shares != 0) revert WithdrawalAlreadyPending();
+
+        uint256 claimableAt = block.timestamp + withdrawalCooldown;
+        withdrawalRequests[msg.sender] = WithdrawalRequest({shares: shares, claimableAt: claimableAt});
+        totalPendingWithdrawalShares += shares;
+
+        _transfer(msg.sender, address(this), shares); // escrow (reverts if caller lacks the shares)
+
+        emit WithdrawalRequested(msg.sender, shares, claimableAt);
+    }
+
+    /// @notice Step 2 of LP exit: after the cooldown, burn the escrowed shares and pay out assets
+    ///         at the current (fresh-priced) NAV.
+    /// @dev Requires a fresh oracle (`_requireFreshPricing`) so the exit is never priced off a
+    ///      stale feed; a request made during oracle downtime simply claims once the feed recovers.
+    /// @return assets The cNGN amount transferred to the caller.
+    function claimRedeem() external returns (uint256 assets) {
+        WithdrawalRequest memory req = withdrawalRequests[msg.sender];
+        if (req.shares == 0) revert NoWithdrawalRequest();
+        if (block.timestamp < req.claimableAt) revert CooldownNotElapsed();
+
+        _requireFreshPricing();
+
+        uint256 shares = req.shares;
+        delete withdrawalRequests[msg.sender];
+        totalPendingWithdrawalShares -= shares;
+
+        assets = previewRedeem(shares);
+        // Burn the escrowed shares (owned by this contract) and pay the caller. caller==owner so
+        // no allowance is consumed; the vault holds the shares from `requestRedeem`.
+        _withdraw(address(this), msg.sender, address(this), assets, shares);
+
+        emit WithdrawalClaimed(msg.sender, shares, assets);
+    }
+
+    /// @notice Cancel a pending withdrawal request and return the escrowed shares.
+    function cancelRedeem() external {
+        WithdrawalRequest memory req = withdrawalRequests[msg.sender];
+        if (req.shares == 0) revert NoWithdrawalRequest();
+
+        uint256 shares = req.shares;
+        delete withdrawalRequests[msg.sender];
+        totalPendingWithdrawalShares -= shares;
+
+        _transfer(address(this), msg.sender, shares); // return escrowed shares
+
+        emit WithdrawalCancelled(msg.sender, shares);
     }
 }

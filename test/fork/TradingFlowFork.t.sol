@@ -109,8 +109,12 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
         uint256 badLeverage = CRYPTO_MAX_LEVERAGE + 1;
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, badLeverage, salt));
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, badLeverage, acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -118,7 +122,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.ExceedsMaxLeverage.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, badLeverage, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, badLeverage, acceptablePrice, deadline, salt);
     }
 
     /// @notice Leverage of 0 should revert.
@@ -126,7 +130,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(0), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(0), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -134,7 +142,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.ExceedsMaxLeverage.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 0, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 0, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -146,7 +154,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -154,7 +166,7 @@ contract TradingFlowForkTest is BaseForkSetup {
         // Don't advance blocks — execute in same block
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.TooEarlyToExecute.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /// @notice Executing exactly at MIN_BLOCK_DELAY should revert (needs > delay, not >=).
@@ -162,7 +174,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -171,7 +187,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.TooEarlyToExecute.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /// @notice Executing after MAX_BLOCK_DELAY should revert (order expired).
@@ -179,7 +195,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -188,7 +208,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.OrderExpired.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /// @notice Execute at the last valid block (commitBlock + MAX_BLOCK_DELAY).
@@ -196,7 +216,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -204,7 +228,7 @@ contract TradingFlowForkTest is BaseForkSetup {
         vm.roll(block.number + 20); // exactly MAX_BLOCK_DELAY
 
         vm.prank(trader1);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
 
         PerpDEX.Position memory pos = perp.getPosition(ETH_MARKET, trader1);
         assertGt(pos.size, 0);
@@ -215,6 +239,8 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
         bytes32 wrongHash = keccak256("wrong");
 
         vm.prank(trader1);
@@ -224,7 +250,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.OrderHashMismatch.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /// @notice No committed order should revert.
@@ -232,10 +258,12 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256("anysalt");
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.NoCommittedOrder.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -250,7 +278,11 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         // Try opening again
         bytes32 salt2 = keccak256(abi.encode(trader1, block.number + 100, block.timestamp));
-        bytes32 orderHash2 = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt2));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash2 = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt2)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash2);
@@ -261,7 +293,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.PositionAlreadyOpen.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt2);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt2);
     }
 
     /// @notice Can open positions in different markets simultaneously.
@@ -418,7 +450,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, uint256(0), uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, uint256(0), uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -426,7 +462,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.ZeroAmount.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 0, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 0, 3, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -441,7 +477,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         perp.disableMarket(ETH_MARKET);
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -449,7 +489,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.MarketNotEnabled.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /// @notice Existing position can be closed after market is disabled.
@@ -491,7 +531,11 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader1, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, 50_000e6, uint256(3), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -502,7 +546,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader1);
         vm.expectRevert(); // EnforcedPause
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, 50_000e6, 3, acceptablePrice, deadline, salt);
     }
 
     /// @notice Unpaused protocol resumes trading.
@@ -574,9 +618,14 @@ contract TradingFlowForkTest is BaseForkSetup {
         _refreshEthPrices();
 
         bytes32 salt = keccak256(abi.encode(trader3, block.number, block.timestamp));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
         uint256 hugeCollateral = 40_000_000e6;
-        bytes32 orderHash =
-            keccak256(abi.encode(trader3, ETH_MARKET, PerpDEX.Side.Long, hugeCollateral, uint256(5), salt));
+        bytes32 orderHash = keccak256(
+            abi.encode(
+                trader3, ETH_MARKET, PerpDEX.Side.Long, hugeCollateral, uint256(5), acceptablePrice, deadline, salt
+            )
+        );
 
         vm.prank(trader3);
         perp.requestTrade(orderHash);
@@ -587,7 +636,7 @@ contract TradingFlowForkTest is BaseForkSetup {
 
         vm.prank(trader3);
         vm.expectRevert(PerpDEX.ExceedsMaxOI.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, hugeCollateral, 5, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, hugeCollateral, 5, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -621,34 +670,36 @@ contract TradingFlowForkTest is BaseForkSetup {
          13. FUNDING RATE ACCUMULATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Funding rate should accumulate over time when OI is imbalanced.
+    /// @notice Funding accrues (zero-sum) over time when OI is imbalanced AND both sides exist.
     function test_fundingRate_accumulatesOnImbalance() public {
         _refreshEthPrices();
 
-        // Only long — fully imbalanced
+        // Both sides open, long-heavy (longOI = 300k > shortOI = 100k) so funding can be
+        // exchanged. Zero-sum funding requires a counterparty on each side.
         _commitAndExecute(trader1, ETH_MARKET, PerpDEX.Side.Long, 100_000e6, 3);
+        _refreshEthPrices();
+        _commitAndExecute(trader2, ETH_MARKET, PerpDEX.Side.Short, 50_000e6, 2);
 
         PerpDEX.MarketOI memory oiBefore = perp.getMarketOI(ETH_MARKET);
-        int256 fundingBefore = oiBefore.fundingIndex;
+        int256 longBefore = oiBefore.longFundingIndex;
+        int256 shortBefore = oiBefore.shortFundingIndex;
 
         // Advance time (stay within crypto staleness so prices remain valid)
         vm.warp(block.timestamp + 60); // 60s < 120s staleness
 
-        // Trigger funding update by opening another position
+        // Trigger a funding update without changing the OI sides
         _refreshEthPrices();
-        _commitAndExecute(trader2, ETH_MARKET, PerpDEX.Side.Short, 50_000e6, 2);
+        vm.prank(trader1);
+        perp.addCollateral(ETH_MARKET, 1e6);
 
         PerpDEX.MarketOI memory oiAfter = perp.getMarketOI(ETH_MARKET);
-        int256 fundingAfter = oiAfter.fundingIndex;
 
-        // Funding should have moved (long-heavy → positive index → long pays short)
-        assertGt(fundingAfter, fundingBefore, "Funding index should increase with long-heavy OI");
-
-        console.log("Funding before:", uint256(fundingBefore));
-        console.log("Funding after:", uint256(fundingAfter));
+        // Long-heavy → longs pay (long index rises), shorts receive (short index falls).
+        assertGt(oiAfter.longFundingIndex, longBefore, "Long funding index should rise when long-heavy");
+        assertLt(oiAfter.shortFundingIndex, shortBefore, "Short funding index should fall when long-heavy");
     }
 
-    /// @notice Balanced OI should result in minimal/zero funding.
+    /// @notice Balanced OI should result in no funding accrual on either side.
     function test_fundingRate_balanced_nearZero() public {
         _refreshEthPrices();
 
@@ -659,9 +710,10 @@ contract TradingFlowForkTest is BaseForkSetup {
         PerpDEX.MarketOI memory oi = perp.getMarketOI(ETH_MARKET);
         assertEq(oi.longOI, oi.shortOI, "OI should be balanced");
 
-        // The funding updated during executeTrade already. Further time won't move it much
+        // The funding updated during executeTrade already. Further time won't move it
         // because the imbalance is zero.
-        int256 fundingNow = oi.fundingIndex;
+        int256 longNow = oi.longFundingIndex;
+        int256 shortNow = oi.shortFundingIndex;
 
         vm.warp(block.timestamp + 7200); // 2 hours
 
@@ -671,8 +723,9 @@ contract TradingFlowForkTest is BaseForkSetup {
         perp.addCollateral(ETH_MARKET, 1e6);
 
         PerpDEX.MarketOI memory oiAfter = perp.getMarketOI(ETH_MARKET);
-        // With perfectly balanced OI, fundingIndex should not change
-        assertEq(oiAfter.fundingIndex, fundingNow, "Funding should not change when OI is balanced");
+        // With perfectly balanced OI, neither funding index should change
+        assertEq(oiAfter.longFundingIndex, longNow, "Long funding should not change when OI is balanced");
+        assertEq(oiAfter.shortFundingIndex, shortNow, "Short funding should not change when OI is balanced");
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -44,22 +44,30 @@ import {MarketVault} from "./MarketVault.sol";
 ///      Trade execution uses a two-step commit-reveal pattern to prevent front-running:
 ///        1. `requestTrade()` — trader commits a hash of their order parameters.
 ///        2. `executeTrade()` — trader reveals parameters after a block delay; the hash is
-///           verified, and the position is opened at the current mark price.
+///           verified, and the position is opened at the current mark price, subject to the
+///           committed `acceptablePrice` slippage bound and `deadline`.
 ///      The delay window is [MIN_BLOCK_DELAY, MAX_BLOCK_DELAY] blocks.
 ///
 ///      ─── Funding rate ───
-///      A continuous funding rate incentivizes OI balance. Longs pay shorts (or vice versa)
-///      based on the imbalance ratio: `imbalance = (longOI − shortOI) / totalOI`. The
-///      cumulative `fundingIndex` is updated on every trade/close/liquidation and applied
-///      as a PnL adjustment at settlement.
+///      A continuous funding rate incentivizes OI balance. Funding is strictly zero-sum
+///      between traders: the dominant side pays exactly what the minority side receives,
+///      scaled by the imbalance ratio `imbalance = (longOI − shortOI) / totalOI`. Each side
+///      has its own cumulative index (`longFundingIndex` / `shortFundingIndex`), updated on
+///      every trade/close/liquidation and applied as a PnL adjustment at settlement. A
+///      one-sided market accrues no funding (there is no counterparty). Pending funding is
+///      also netted into `MarketVault.totalAssets()` so LP share pricing stays accurate.
 ///
 ///      ─── Liquidations ───
 ///      A position is liquidatable when its equity (collateral + unrealized PnL − funding)
-///      falls below `maintenanceMarginRatio × positionSize`. Two liquidation paths exist:
-///        a) Public liquidation — anyone calls `liquidate()` and earns a 1% bounty.
+///      falls below `maintenanceMarginRatio × positionSize`. The bounty is 1% of the position's
+///      COLLATERAL (not remaining equity), so even underwater/bankrupt positions remain
+///      profitable to clear. Two paths exist:
+///        a) Public liquidation — anyone calls `liquidate()` and earns the bounty.
 ///        b) Automated liquidation — Chainlink Automation nodes call `checkUpkeep()` /
-///           `performUpkeep()` via a registered forwarder. Batch-processes up to 10
-///           liquidations per call.
+///           `performUpkeep()` via a registered forwarder (bounty retained in the vault as LP
+///           yield). Batch-processes up to 10 liquidations per call.
+///      Liquidation paths are intentionally NOT pausable (they are the LP-solvency backstop),
+///      though they still require a fresh oracle and so cannot run on stale prices.
 ///
 ///      ─── Access control ───
 ///      Admin functions (`addMarket`, `disableMarket`, `pause`, etc.) use the `restricted`
@@ -78,11 +86,12 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///      to PRECISION for math and scaled back down for settlement.
     uint256 public constant PRECISION = 1e18;
 
-    /// @notice Fraction of remaining equity paid to the liquidator as a bounty (1%).
+    /// @notice Fraction of a position's COLLATERAL paid to the liquidator as a bounty (1%).
     /// @dev Expressed in PRECISION: 1e16 / 1e18 = 0.01 = 1%.
-    ///      Applied to the trader's remaining equity (if positive) at liquidation time.
-    ///      For automated (forwarder) liquidations, the bounty stays in the vault as
-    ///      protocol yield rather than being paid to the Chainlink node.
+    ///      Based on collateral (not remaining equity) so liquidating an underwater/bankrupt
+    ///      position is still profitable. A solvent trader funds the bounty from their payout;
+    ///      otherwise it is covered by the retained collateral. For automated (forwarder)
+    ///      liquidations the bounty stays in the vault as protocol yield instead of being paid out.
     uint256 public constant LIQUIDATION_BOUNTY_RATIO = 1e16; // 1%
 
     /// @notice Minimum number of blocks a trader must wait after committing before executing.
@@ -119,6 +128,12 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///      Expressed in PRECISION: 25e15 / 1e18 = 0.025 = 2.5%.
     uint256 public constant MAX_CONFIDENCE_RATIO = 25e15; // 2.5%
 
+    /// @notice Grace period (seconds) that must elapse after the L2 sequencer recovers before
+    ///         Chainlink prices are accepted again.
+    /// @dev Guards against acting on prices in the window right after the sequencer comes back,
+    ///      when users have not yet had a fair chance to react. 1 hour.
+    uint256 public constant SEQUENCER_GRACE_PERIOD = 3600;
+
     /*//////////////////////////////////////////////////////////////
                                 ENUMS
     //////////////////////////////////////////////////////////////*/
@@ -149,7 +164,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         uint256 size; //              Notional position size in cNGN (PRECISION scaled, 18 dec)
         uint256 collateral; //        Margin collateral in cNGN (raw token units, 6 dec)
         uint256 averagePrice; //      Weighted average entry price in cNGN (PRECISION scaled)
-        int256 entryFundingIndex; //  Snapshot of `marketOI.fundingIndex` at position open
+        int256 entryFundingIndex; //  Snapshot of this side's funding index (long/short) at position open
         Side side; //                 Long or Short
     }
 
@@ -162,6 +177,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         uint256 maxLeverage; //            Max leverage multiplier (e.g. 10 = 10× leverage)
         uint256 maintenanceMarginRatio; // Liquidation threshold (PRECISION: 2e16 = 2%)
         uint256 maxOIMultiplier; //        Max total OI as multiple of vault TVL (PRECISION: 5e18 = 5×)
+        uint256 maxOpenInterest; //        Absolute OI ceiling (PRECISION cNGN); hard cap independent of TVL
         MarketType marketType; //          Asset class for this market
         MarketVault vault; //              Isolated ERC4626 vault for this market's liquidity
         bool enabled; //                   False = no new positions; existing ones can still close
@@ -179,12 +195,15 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///      Weighted average prices enable efficient aggregate unrealized PnL calculation
     ///      without iterating over individual positions.
     struct MarketOI {
-        uint256 longOI; //          Total long notional (PRECISION scaled cNGN value)
-        uint256 shortOI; //         Total short notional (PRECISION scaled cNGN value)
-        uint256 avgLongPrice; //    Volume-weighted average entry price of all longs (PRECISION)
-        uint256 avgShortPrice; //   Volume-weighted average entry price of all shorts (PRECISION)
-        int256 fundingIndex; //     Cumulative per-unit funding (PRECISION scaled, accrues over time)
-        uint256 lastFundingUpdate; // Timestamp of the last funding rate update
+        uint256 longOI; //              Total long notional (PRECISION scaled cNGN value)
+        uint256 shortOI; //             Total short notional (PRECISION scaled cNGN value)
+        uint256 sumLongInvEntry; //     Σ over open longs of (size × PRECISION / entryPrice) — for exact aggregate PnL
+        uint256 sumShortInvEntry; //    Σ over open shorts of (size × PRECISION / entryPrice) — for exact aggregate PnL
+        int256 longFundingIndex; //     Cumulative per-unit funding cost for LONGS (+ = longs pay, − = longs receive)
+        int256 shortFundingIndex; //    Cumulative per-unit funding cost for SHORTS (+ = shorts pay, − = shorts receive)
+        int256 sumLongEntryFunding; //  Σ over open longs of size × entryFundingIndex (for aggregate funding)
+        int256 sumShortEntryFunding; // Σ over open shorts of size × entryFundingIndex (for aggregate funding)
+        uint256 lastFundingUpdate; //   Timestamp of the last funding rate update
     }
 
     /// @notice Comprehensive read-only market snapshot returned by `getMarketInfo()`.
@@ -206,7 +225,8 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         // ── Open interest (PRECISION scaled) ──
         uint256 longOI; //                Total long notional value
         uint256 shortOI; //               Total short notional value
-        int256 fundingIndex; //           Cumulative per-unit funding index
+        int256 longFundingIndex; //       Cumulative per-unit funding index for longs (+ = longs pay)
+        int256 shortFundingIndex; //      Cumulative per-unit funding index for shorts (+ = shorts pay)
         // ── Vault & liquidity (token precision, 6 dec) ──
         uint256 vaultTVL; //              LP-available assets in the vault
         uint256 collateralHeld; //        Trader collateral held in the vault
@@ -235,6 +255,23 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @notice Maximum acceptable age (in seconds) for the Chainlink NGN/USD price.
     /// @dev If `block.timestamp − updatedAt > usdNgnMaxStaleness`, `_getUsdNgnRate()` reverts.
     uint256 public usdNgnMaxStaleness;
+
+    /// @notice Chainlink L2 Sequencer Uptime feed for the host rollup (Base).
+    /// @dev Checked in `_getUsdNgnRate()` before consuming the Chainlink price so the protocol
+    ///      rejects prices observed while the sequencer is down or within the grace window after
+    ///      it recovers. May be `address(0)` to disable the check (e.g. non-L2 or test contexts);
+    ///      production Base deployments must set the real feed
+    ///      (`0xBCF85224fc0756B9Fa45aA7892530B47e10b6433`).
+    AggregatorV3Interface public immutable sequencerUptimeFeed;
+
+    /// @notice Cached last good mark price per market (PRECISION, 18 dec), written on every
+    ///         state-changing price fetch. Used as an oracle-independent fallback for read-only
+    ///         vault accounting (`getMarketUnrealizedPnLSafe` → `MarketVault.totalAssets()` previews
+    ///         /getters) so views don't revert on a stale feed. NOTE: value-moving LP actions
+    ///         (deposit/mint/withdraw/redeem) are separately gated on a FRESH price and therefore
+    ///         DO revert during oracle downtime while open interest exists — the cached value is
+    ///         intentionally not used to price live entries or exits.
+    mapping(bytes32 => uint256) public lastMarkPrice;
 
     /// @notice Per-market configuration. Key: `marketId` (e.g. `keccak256("ETH-PERP")`).
     mapping(bytes32 => MarketConfig) public marketConfigs;
@@ -311,8 +348,8 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         address indexed trader, bytes32 indexed marketId, address indexed liquidator, uint256 bounty, uint256 price
     );
 
-    /// @notice Emitted after the funding index is updated for a market.
-    event FundingUpdated(bytes32 indexed marketId, int256 newFundingIndex);
+    /// @notice Emitted after the funding indices are updated for a market.
+    event FundingUpdated(bytes32 indexed marketId, int256 longFundingIndex, int256 shortFundingIndex);
 
     /// @notice Emitted when a trader adds collateral to their position.
     event CollateralAdded(address indexed trader, bytes32 indexed marketId, uint256 amount);
@@ -351,6 +388,11 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     error ZeroAddress(); //                 Address parameter is address(0)
     error InvalidParameters(); //           One or more config values are zero
     error StaleChainlinkPrice(); //         Chainlink price is older than usdNgnMaxStaleness
+    error SequencerDown(); //               L2 sequencer uptime feed reports the sequencer is down
+    error SequencerGracePeriodNotElapsed(); // Sequencer recovered too recently (within grace period)
+    error SlippageExceeded(); //            Mark price at execution is outside the committed bound
+    error DeadlineExceeded(); //            executeTrade revealed after the committed deadline
+    error InsufficientFee(); //             msg.value below the Pyth update fee in updatePythPrices
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -366,17 +408,23 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @param _ngnUsdChainlinkFeed   Address of the Chainlink NGN/USD price feed on Base.
     /// @param _usdNgnMaxStaleness    Maximum acceptable age (seconds) for the Chainlink price.
     /// @param _accessManager         Address of the SovereigntyAccessManager (UUPS proxy).
+    /// @param _sequencerUptimeFeed   Chainlink L2 Sequencer Uptime feed on Base. May be
+    ///                               `address(0)` to disable the sequencer check (non-L2/tests).
     constructor(
         address _cNGN,
         address _pyth,
         address _ngnUsdChainlinkFeed,
         uint256 _usdNgnMaxStaleness,
-        address _accessManager
+        address _accessManager,
+        address _sequencerUptimeFeed
     ) AccessManaged(_accessManager) {
+        if (_cNGN == address(0) || _pyth == address(0) || _ngnUsdChainlinkFeed == address(0)) revert ZeroAddress();
+        if (_usdNgnMaxStaleness == 0) revert InvalidParameters();
         cNGN = IERC20(_cNGN);
         pyth = IPyth(_pyth);
         ngnUsdChainlinkFeed = AggregatorV3Interface(_ngnUsdChainlinkFeed);
         usdNgnMaxStaleness = _usdNgnMaxStaleness;
+        sequencerUptimeFeed = AggregatorV3Interface(_sequencerUptimeFeed);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -395,6 +443,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @param _maxLeverage            Maximum leverage traders can use (e.g. 10 = 10×).
     /// @param _maintenanceMarginRatio Liquidation threshold (PRECISION, e.g. 2e16 = 2%).
     /// @param _maxOIMultiplier        Max total OI as a multiple of vault TVL (PRECISION).
+    /// @param _maxOpenInterest        Absolute OI ceiling (PRECISION cNGN), independent of TVL.
     /// @param _marketType             Asset classification for this market.
     /// @param _vault                  Address of the pre-deployed MarketVault for this market.
     function addMarket(
@@ -404,12 +453,21 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         uint256 _maxLeverage,
         uint256 _maintenanceMarginRatio,
         uint256 _maxOIMultiplier,
+        uint256 _maxOpenInterest,
         MarketType _marketType,
         address _vault
     ) external restricted {
-        if (marketConfigs[_marketId].enabled) revert MarketAlreadyExists();
+        // Market IDs are immutable once used: a market ID that has ever been initialized
+        // (pythFeedId set) can never be re-added, even after `disableMarket()`. This prevents
+        // overwriting a market's config (notably its vault) while stale positions, OI, and
+        // collateral accounting still live under the same ID. `pythFeedId == 0` is the
+        // contract-wide "market does not exist" sentinel, so it is the canonical existence key.
+        if (marketConfigs[_marketId].pythFeedId != bytes32(0)) revert MarketAlreadyExists();
+        if (_pythFeedId == bytes32(0)) revert InvalidParameters();
         if (_vault == address(0)) revert ZeroAddress();
-        if (_maxLeverage == 0 || _maintenanceMarginRatio == 0 || _maxOIMultiplier == 0) revert InvalidParameters();
+        if (_maxLeverage == 0 || _maintenanceMarginRatio == 0 || _maxOIMultiplier == 0 || _maxOpenInterest == 0) {
+            revert InvalidParameters();
+        }
 
         marketConfigs[_marketId] = MarketConfig({
             pythFeedId: _pythFeedId,
@@ -417,6 +475,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             maxLeverage: _maxLeverage,
             maintenanceMarginRatio: _maintenanceMarginRatio,
             maxOIMultiplier: _maxOIMultiplier,
+            maxOpenInterest: _maxOpenInterest,
             marketType: _marketType,
             vault: MarketVault(_vault),
             enabled: true
@@ -448,21 +507,26 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @param _maxLeverage            New maximum leverage multiplier.
     /// @param _maintenanceMarginRatio New liquidation threshold (PRECISION).
     /// @param _maxOIMultiplier        New OI cap relative to vault TVL (PRECISION).
+    /// @param _maxOpenInterest        New absolute OI ceiling (PRECISION cNGN), independent of TVL.
     /// @param _maxStaleness           New maximum Pyth price age (seconds).
     function updateMarketParams(
         bytes32 _marketId,
         uint256 _maxLeverage,
         uint256 _maintenanceMarginRatio,
         uint256 _maxOIMultiplier,
+        uint256 _maxOpenInterest,
         uint256 _maxStaleness
     ) external restricted {
         MarketConfig storage cfg = marketConfigs[_marketId];
         if (!cfg.enabled && cfg.pythFeedId == bytes32(0)) revert MarketNotEnabled();
-        if (_maxLeverage == 0 || _maintenanceMarginRatio == 0 || _maxOIMultiplier == 0) revert InvalidParameters();
+        if (_maxLeverage == 0 || _maintenanceMarginRatio == 0 || _maxOIMultiplier == 0 || _maxOpenInterest == 0) {
+            revert InvalidParameters();
+        }
 
         cfg.maxLeverage = _maxLeverage;
         cfg.maintenanceMarginRatio = _maintenanceMarginRatio;
         cfg.maxOIMultiplier = _maxOIMultiplier;
+        cfg.maxOpenInterest = _maxOpenInterest;
         cfg.maxStaleness = _maxStaleness;
 
         emit MarketUpdated(_marketId, _maxLeverage, _maintenanceMarginRatio);
@@ -475,6 +539,8 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @param _feed          Address of the new Chainlink AggregatorV3 feed.
     /// @param _maxStaleness  Maximum acceptable price age (seconds) for the new feed.
     function setUsdNgnFeed(address _feed, uint256 _maxStaleness) external restricted {
+        if (_feed == address(0)) revert ZeroAddress();
+        if (_maxStaleness == 0) revert InvalidParameters();
         ngnUsdChainlinkFeed = AggregatorV3Interface(_feed);
         usdNgnMaxStaleness = _maxStaleness;
         emit UsdNgnFeedConfigured(_feed, _maxStaleness);
@@ -499,8 +565,20 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///      Access: restricted via SovereigntyAccessManager.
     /// @param _forwarder The Automation forwarder contract address.
     function setForwarder(address _forwarder) external restricted {
+        if (_forwarder == address(0)) revert ZeroAddress();
         liquidationForwarder = _forwarder;
         emit ForwarderSet(_forwarder);
+    }
+
+    /// @notice Explicitly disable automated (forwarder) liquidations.
+    /// @dev Clears `liquidationForwarder` so `performUpkeep()` is no longer callable by anyone.
+    ///      Public, permissionless `liquidate()` continues to work. Provided as a distinct,
+    ///      auditable action so that disabling automation is intentional rather than an
+    ///      accidental zero-address passed to `setForwarder()`.
+    ///      Access: restricted via SovereigntyAccessManager.
+    function disableForwarder() external restricted {
+        liquidationForwarder = address(0);
+        emit ForwarderSet(address(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -529,6 +607,17 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         uint256 usdNgn = _getUsdNgnRate(); //                                 USD/NGN  (18 dec)
 
         return (assetUsd * usdNgn) / PRECISION; // Asset/cNGN (18 dec)
+    }
+
+    /// @dev Fetch the live mark price and cache it as the market's last-good price.
+    ///      Used by every state-changing operation so that, if the oracle later goes stale,
+    ///      read-only LP accounting (`getMarketUnrealizedPnLSafe`, used by `totalAssets()` previews
+    ///      and getters) has a recent fallback and does not revert. State-changing callers require a
+    ///      fresh price, so the cache only ever advances to a freshly-validated value. (Value-moving
+    ///      LP entries/exits are gated on a fresh price and are NOT served from this cache.)
+    function _refreshMarkPrice(bytes32 _marketId) internal returns (uint256 markPrice) {
+        markPrice = _getMarkPrice(_marketId);
+        lastMarkPrice[_marketId] = markPrice;
     }
 
     /// @dev Fetch a Pyth price, validate it, and normalize to 18 decimals.
@@ -577,6 +666,8 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///
     /// @return USD/NGN rate normalized to 18 decimals (PRECISION).
     function _getUsdNgnRate() internal view returns (uint256) {
+        _checkSequencer();
+
         (, int256 answer,, uint256 updatedAt,) = ngnUsdChainlinkFeed.latestRoundData();
         if (answer <= 0) revert InvalidPrice();
         if (block.timestamp - updatedAt > usdNgnMaxStaleness) revert StaleChainlinkPrice();
@@ -585,13 +676,29 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         return (PRECISION * 10 ** feedDecimals) / uint256(answer);
     }
 
+    /// @dev Revert if the L2 sequencer is down or only recently recovered.
+    ///      No-op when no sequencer feed is configured (`address(0)`), e.g. non-L2 deployments
+    ///      or unit tests. The uptime feed reports `answer == 0` while the sequencer is up and
+    ///      `answer == 1` while it is down; `startedAt` marks the last status change.
+    function _checkSequencer() internal view {
+        AggregatorV3Interface feed = sequencerUptimeFeed;
+        if (address(feed) == address(0)) return;
+
+        (, int256 answer, uint256 startedAt,,) = feed.latestRoundData();
+        if (answer != 0) revert SequencerDown();
+        if (block.timestamp - startedAt <= SEQUENCER_GRACE_PERIOD) revert SequencerGracePeriodNotElapsed();
+    }
+
     /// @notice Push fresh Pyth price data on-chain. Must be called before any price-dependent
     ///         operation (trading, liquidation, collateral management).
-    /// @dev The caller sends ETH to cover the Pyth update fee. Any excess ETH is refunded
-    ///      automatically. Typically bundled in the same transaction as `executeTrade()`.
+    /// @dev The caller must send at least the Pyth update fee; any excess is refunded. The fee is
+    ///      funded strictly from `msg.value` (the `require` below), so the contract's own ETH
+    ///      balance can never be spent on a caller's update — preventing third parties from
+    ///      draining stray/donated ETH held by the contract.
     /// @param _priceUpdate Pyth price update payload(s) obtained from the Hermes API.
     function updatePythPrices(bytes[] calldata _priceUpdate) external payable {
         uint256 fee = pyth.getUpdateFee(_priceUpdate);
+        if (msg.value < fee) revert InsufficientFee();
         pyth.updatePriceFeeds{value: fee}(_priceUpdate);
 
         // Refund excess ETH
@@ -605,21 +712,29 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
                        FUNDING RATE ENGINE
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Accrue funding for a market based on the OI imbalance since the last update.
+    /// @dev Accrue funding for a market since the last update.
     ///
-    ///      Funding is a zero-sum transfer between longs and shorts that incentivizes
-    ///      OI balance. The dominant side pays the minority side.
+    ///      Funding is a **zero-sum transfer between longs and shorts**: every cNGN paid by
+    ///      the dominant side is received by the minority side. Each side has its own cumulative
+    ///      per-unit index (`+` = that side pays). The paying side accrues the standard
+    ///      imbalance-scaled rate; the receiving side accrues a credit scaled by the OI ratio
+    ///      so that `total paid == total received`:
     ///
-    ///      Calculation:
-    ///        imbalance  = (longOI − shortOI) / totalOI       ∈ [-1, 1]  (PRECISION scaled)
-    ///        fundingΔ   = imbalance × FUNDING_RATE_PER_SECOND × elapsed / PRECISION
-    ///        fundingIndex += fundingΔ
+    ///        imbalance = (longOI − shortOI) / totalOI                 ∈ [-1, 1]  (PRECISION)
+    ///        D         = imbalance × FUNDING_RATE_PER_SECOND × elapsed / PRECISION
     ///
-    ///      When `imbalance > 0` (more longs), `fundingIndex` rises → longs pay, shorts earn.
-    ///      When `imbalance < 0` (more shorts), `fundingIndex` falls → shorts pay, longs earn.
+    ///        longs dominant (D > 0):  longΔ = +D,  shortΔ = −D × longOI / shortOI
+    ///        shorts dominant (D < 0): shortΔ = −D, longΔ  = +D × shortOI / longOI
+    ///
+    ///        total longs pay  = longOI  × longΔ  / PRECISION
+    ///        total shorts get = shortOI × |shortΔ| / PRECISION   (equal, opposite sign)
+    ///
+    ///      A counterparty is required on BOTH sides for any exchange: when either side has
+    ///      zero OI, no funding accrues (there is no one to pay or receive). This also means a
+    ///      fully one-sided market accrues nothing — unlike a funding-to-LP design.
     ///
     ///      Called at the start of every state-changing operation (open, close, liquidate,
-    ///      add/remove collateral) to ensure the index is current before PnL calculations.
+    ///      add/remove collateral) so the indices are current before PnL calculations.
     /// @param _marketId The market to update funding for.
     function _updateFunding(bytes32 _marketId) internal {
         MarketOI storage moi = marketOI[_marketId];
@@ -633,33 +748,67 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         uint256 elapsed = block.timestamp - moi.lastFundingUpdate;
         if (elapsed == 0) return; // Same block — no time has passed
 
-        uint256 totalOI = moi.longOI + moi.shortOI;
-        if (totalOI == 0) {
-            // No open interest — nothing to accrue, just update timestamp
-            moi.lastFundingUpdate = block.timestamp;
-            return;
+        (int256 longDelta, int256 shortDelta) = _fundingDeltas(moi, elapsed);
+        if (longDelta != 0 || shortDelta != 0) {
+            moi.longFundingIndex += longDelta;
+            moi.shortFundingIndex += shortDelta;
+            emit FundingUpdated(_marketId, moi.longFundingIndex, moi.shortFundingIndex);
         }
-
-        // imbalance ∈ [-PRECISION, PRECISION], representing [-100%, 100%]
-        int256 imbalance = (int256(moi.longOI) - int256(moi.shortOI)) * int256(PRECISION) / int256(totalOI);
-
-        // Funding delta: imbalance × rate × time, normalized back to PRECISION
-        int256 fundingDelta = imbalance * int256(FUNDING_RATE_PER_SECOND) * int256(elapsed) / int256(PRECISION);
-
-        moi.fundingIndex += fundingDelta;
         moi.lastFundingUpdate = block.timestamp;
+    }
 
-        emit FundingUpdated(_marketId, moi.fundingIndex);
+    /// @dev Compute the per-side funding index deltas for an elapsed interval, given current OI.
+    ///      Pure function of `moi` + `elapsed`; used both to mutate state (`_updateFunding`) and
+    ///      to project indices forward in view paths (`_currentFundingIndices`).
+    /// @return longDelta  Change to apply to `longFundingIndex`  (+ = longs pay).
+    /// @return shortDelta Change to apply to `shortFundingIndex` (+ = shorts pay).
+    function _fundingDeltas(MarketOI storage moi, uint256 elapsed)
+        internal
+        view
+        returns (int256 longDelta, int256 shortDelta)
+    {
+        uint256 longOI = moi.longOI;
+        uint256 shortOI = moi.shortOI;
+
+        // Zero-sum funding requires a counterparty on both sides.
+        if (longOI == 0 || shortOI == 0) return (0, 0);
+
+        uint256 totalOI = longOI + shortOI;
+        int256 imbalance = (int256(longOI) - int256(shortOI)) * int256(PRECISION) / int256(totalOI);
+        int256 D = imbalance * int256(FUNDING_RATE_PER_SECOND) * int256(elapsed) / int256(PRECISION);
+
+        if (D > 0) {
+            // Longs dominant → longs pay D per unit; shorts receive the matching total.
+            longDelta = D;
+            shortDelta = -(D * int256(longOI) / int256(shortOI));
+        } else if (D < 0) {
+            // Shorts dominant → shorts pay (−D) per unit; longs receive the matching total.
+            shortDelta = -D;
+            longDelta = D * int256(shortOI) / int256(longOI); // D < 0 → negative (credit to longs)
+        }
+    }
+
+    /// @dev Return the funding indices projected forward to `block.timestamp`, so view callers
+    ///      see funding accrued since the last on-chain `_updateFunding`. In state-changing
+    ///      paths `_updateFunding` runs first, so the projection adds zero there.
+    function _currentFundingIndices(MarketOI storage moi) internal view returns (int256 longIndex, int256 shortIndex) {
+        longIndex = moi.longFundingIndex;
+        shortIndex = moi.shortFundingIndex;
+
+        if (moi.lastFundingUpdate == 0) return (longIndex, shortIndex);
+        uint256 elapsed = block.timestamp - moi.lastFundingUpdate;
+        if (elapsed == 0) return (longIndex, shortIndex);
+
+        (int256 longDelta, int256 shortDelta) = _fundingDeltas(moi, elapsed);
+        longIndex += longDelta;
+        shortIndex += shortDelta;
     }
 
     /// @dev Calculate the funding payment owed by (or owed to) a specific position.
     ///
-    ///      `indexDelta = currentFundingIndex − entryFundingIndex`
-    ///
-    ///      - Longs: `funding = size × indexDelta / PRECISION`
-    ///        Positive indexDelta → longs pay (funding is a cost, subtracted from equity).
-    ///      - Shorts: `funding = −(size × indexDelta / PRECISION)`
-    ///        Positive indexDelta → shorts earn (funding is a credit, added to equity).
+    ///      The sign is baked into each side's index, so the same formula applies to both:
+    ///        `funding = size × (sideIndexNow − entryFundingIndex) / PRECISION`
+    ///      Positive = the position pays funding (subtracted from equity); negative = receives.
     ///
     ///      The returned value is subtracted from raw PnL at settlement:
     ///        `netPnL = rawPnL − pendingFunding`
@@ -669,13 +818,9 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     /// @return Funding cost (positive = trader pays, negative = trader receives). PRECISION scaled.
     function _pendingFunding(bytes32 _marketId, Position storage pos) internal view returns (int256) {
         MarketOI storage moi = marketOI[_marketId];
-        int256 indexDelta = moi.fundingIndex - pos.entryFundingIndex;
-
-        if (pos.side == Side.Long) {
-            return int256(pos.size) * indexDelta / int256(PRECISION);
-        } else {
-            return -(int256(pos.size) * indexDelta / int256(PRECISION));
-        }
+        (int256 longIndex, int256 shortIndex) = _currentFundingIndices(moi);
+        int256 sideIndex = pos.side == Side.Long ? longIndex : shortIndex;
+        return int256(pos.size) * (sideIndex - pos.entryFundingIndex) / int256(PRECISION);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -684,8 +829,10 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
 
     /// @notice Step 1 of the commit-reveal order flow: commit a hashed order.
     /// @dev The trader computes `keccak256(abi.encode(trader, marketId, side, collateral,
-    ///      leverage, salt))` off-chain and submits only the hash. This prevents miners and
-    ///      searchers from front-running the trade because the parameters are hidden.
+    ///      leverage, acceptablePrice, deadline, salt))` off-chain and submits only the hash.
+    ///      This prevents miners and searchers from front-running the trade because the
+    ///      parameters are hidden, while the committed `acceptablePrice`/`deadline` bound the
+    ///      execution so the reveal is not a free option against LPs.
     ///      Only one pending order per address is allowed; a new commit overwrites the old one.
     /// @param _orderHash The keccak256 hash of the order parameters.
     function requestTrade(bytes32 _orderHash) external whenNotPaused {
@@ -713,23 +860,35 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///      Only one position per (market, trader) is allowed. Call `closePosition()` first
     ///      to open a new one.
     ///
-    /// @param _marketId   The market to trade in.
-    /// @param _side       Long or Short.
-    /// @param _collateral Margin deposit in cNGN (token precision, 6 decimals).
-    /// @param _leverage   Leverage multiplier (e.g. 5 = 5×). Must be ≤ `maxLeverage`.
-    /// @param _salt       Random nonce used in the commit hash to prevent hash collisions.
-    function executeTrade(bytes32 _marketId, Side _side, uint256 _collateral, uint256 _leverage, bytes32 _salt)
-        external
-        nonReentrant
-        whenNotPaused
-    {
+    /// @param _marketId       The market to trade in.
+    /// @param _side           Long or Short.
+    /// @param _collateral     Margin deposit in cNGN (token precision, 6 decimals).
+    /// @param _leverage       Leverage multiplier (e.g. 5 = 5×). Must be ≤ `maxLeverage`.
+    /// @param _acceptablePrice Slippage bound (mark price, PRECISION). For a Long, execution
+    ///                         requires `markPrice ≤ acceptablePrice`; for a Short,
+    ///                         `markPrice ≥ acceptablePrice`. Use `type(uint256).max` (Long) or
+    ///                         `0` (Short) to opt out of the bound.
+    /// @param _deadline       Latest `block.timestamp` at which the reveal may execute.
+    /// @param _salt           Random nonce used in the commit hash to prevent hash collisions.
+    function executeTrade(
+        bytes32 _marketId,
+        Side _side,
+        uint256 _collateral,
+        uint256 _leverage,
+        uint256 _acceptablePrice,
+        uint256 _deadline,
+        bytes32 _salt
+    ) external nonReentrant whenNotPaused {
         // --- Verify commit-reveal ---
         CommittedOrder storage order = committedOrders[msg.sender];
         if (order.commitBlock == 0) revert NoCommittedOrder();
         if (block.number <= order.commitBlock + MIN_BLOCK_DELAY) revert TooEarlyToExecute();
         if (block.number > order.commitBlock + MAX_BLOCK_DELAY) revert OrderExpired();
+        if (block.timestamp > _deadline) revert DeadlineExceeded();
 
-        bytes32 expectedHash = keccak256(abi.encode(msg.sender, _marketId, _side, _collateral, _leverage, _salt));
+        bytes32 expectedHash = keccak256(
+            abi.encode(msg.sender, _marketId, _side, _collateral, _leverage, _acceptablePrice, _deadline, _salt)
+        );
         if (order.orderHash != expectedHash) revert OrderHashMismatch();
 
         delete committedOrders[msg.sender];
@@ -747,15 +906,22 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         // --- Update funding ---
         _updateFunding(_marketId);
 
-        // --- Fetch mark price ---
-        uint256 markPrice = _getMarkPrice(_marketId);
+        // --- Fetch mark price (and cache as last-good for LP fallback accounting) ---
+        uint256 markPrice = _refreshMarkPrice(_marketId);
+
+        // --- Enforce committed slippage bound ---
+        if (_side == Side.Long) {
+            if (markPrice > _acceptablePrice) revert SlippageExceeded();
+        } else {
+            if (markPrice < _acceptablePrice) revert SlippageExceeded();
+        }
 
         // --- Calculate position size ---
         uint256 collateralScaled = _toInternalPrecision(_collateral);
         uint256 size = collateralScaled * _leverage;
 
-        // --- Check OI cap ---
-        _checkOICap(_marketId, cfg, size);
+        // --- Check OI cap (against LP liquidity net of trader collateral & unrealized profit) ---
+        _checkOICap(_marketId, cfg, size, markPrice);
 
         // --- Pull collateral from trader to market vault ---
         MarketVault vault = cfg.vault;
@@ -763,27 +929,30 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         marketCollateralHeld[_marketId] += _collateral;
 
         // --- Store position ---
+        // Snapshot this side's funding index as the position's entry. `_updateFunding` ran
+        // above, so the side indices are current.
         MarketOI storage moi = marketOI[_marketId];
+        int256 entryFundingIndex = _side == Side.Long ? moi.longFundingIndex : moi.shortFundingIndex;
         pos.size = size;
         pos.collateral = _collateral;
         pos.averagePrice = markPrice;
-        pos.entryFundingIndex = moi.fundingIndex;
+        pos.entryFundingIndex = entryFundingIndex;
         pos.side = _side;
 
-        // --- Update OI & weighted average prices ---
-        // The weighted average entry price is maintained for efficient aggregate PnL:
-        //   newAvg = (oldAvg × oldOI + markPrice × newSize) / (oldOI + newSize)
-        // This allows `_marketUnrealizedPnL` to compute unrealized PnL for the entire
-        // side (all longs or all shorts) without iterating over individual positions.
+        // --- Update OI, inverse-entry accumulators & aggregate entry funding ---
+        // `sum*InvEntry` accumulates `size × PRECISION / entryPrice` so `_marketUnrealizedPnL`
+        // can compute the EXACT aggregate PnL `Σ size_i·(mark−entry_i)/entry_i` in closed form
+        // (`mark × Σ(size/entry) − OI`) without iterating positions. A volume-weighted ARITHMETIC
+        // mean of entry prices is NOT valid here because PnL is non-linear (reciprocal) in entry.
+        // `sum*EntryFunding` likewise lets `_aggregatePendingFunding` avoid per-position iteration.
         if (_side == Side.Long) {
-            moi.avgLongPrice =
-                moi.longOI == 0 ? markPrice : (moi.avgLongPrice * moi.longOI + markPrice * size) / (moi.longOI + size);
+            moi.sumLongInvEntry += size * PRECISION / markPrice; // markPrice == entry at open
             moi.longOI += size;
+            moi.sumLongEntryFunding += int256(size) * entryFundingIndex;
         } else {
-            moi.avgShortPrice = moi.shortOI == 0
-                ? markPrice
-                : (moi.avgShortPrice * moi.shortOI + markPrice * size) / (moi.shortOI + size);
+            moi.sumShortInvEntry += size * PRECISION / markPrice;
             moi.shortOI += size;
+            moi.sumShortEntryFunding += int256(size) * entryFundingIndex;
         }
 
         // Register trader in the per-market set for Automation liquidation scans
@@ -834,7 +1003,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         MarketConfig storage cfg = marketConfigs[_marketId];
         _updateFunding(_marketId);
 
-        uint256 markPrice = _getMarkPrice(_marketId);
+        uint256 markPrice = _refreshMarkPrice(_marketId);
         int256 pnl = _calculatePnL(pos, markPrice);
         int256 funding = _pendingFunding(_marketId, pos);
         int256 netPnL = pnl - funding;
@@ -870,18 +1039,20 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Permissionless liquidation: anyone can liquidate an underwater position.
-    /// @dev The caller earns a liquidation bounty (1% of the trader's remaining equity,
-    ///      if positive). The position is force-closed and PnL is settled.
-    ///      Reverts with `NotLiquidatable` if equity ≥ maintenance margin.
+    /// @dev The caller earns a liquidation bounty (1% of the position's collateral). The position
+    ///      is force-closed and PnL is settled. Reverts with `NotLiquidatable` if above maintenance.
+    ///      Intentionally NOT `whenNotPaused`: liquidation is the LP-solvency backstop and must
+    ///      stay available during a pause (it still requires a fresh oracle via `_refreshMarkPrice`,
+    ///      so it cannot run on stale prices regardless).
     /// @param _marketId The market the position is in.
     /// @param _trader   The address of the trader to liquidate.
-    function liquidate(bytes32 _marketId, address _trader) external nonReentrant whenNotPaused {
+    function liquidate(bytes32 _marketId, address _trader) external nonReentrant {
         Position storage pos = positions[_marketId][_trader];
         if (pos.size == 0) revert NoOpenPosition();
 
         _updateFunding(_marketId);
 
-        uint256 markPrice = _getMarkPrice(_marketId);
+        uint256 markPrice = _refreshMarkPrice(_marketId);
         _validateAndLiquidate(_marketId, _trader, markPrice, msg.sender);
     }
 
@@ -945,36 +1116,24 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         MarketConfig storage cfg = marketConfigs[_marketId];
         _updateFunding(_marketId);
 
-        uint256 markPrice = _getMarkPrice(_marketId);
+        uint256 markPrice = _refreshMarkPrice(_marketId);
         int256 pnl = _calculatePnL(pos, markPrice);
         int256 funding = _pendingFunding(_marketId, pos);
         int256 netPnL = pnl - funding;
 
-        // --- Remove this position's contribution from aggregate OI & weighted averages ---
-        // Reverse the weighted average formula: remove this position's entry price × size
-        // from the cumulative total, then divide by the reduced OI.
-        // If this was the last position on a side, reset the average to 0.
+        // --- Remove this position's contribution from aggregate OI & accumulators ---
+        // Subtract exactly what was added at open: `size × PRECISION / entryPrice` (entryPrice ==
+        // pos.averagePrice) and `size × entryFundingIndex`. Because open and close use the same
+        // operands, each removal exactly reverses its open with no residual drift.
         MarketOI storage moi = marketOI[_marketId];
         if (pos.side == Side.Long) {
-            if (moi.longOI == pos.size) {
-                moi.avgLongPrice = 0; // Last long — reset
-            } else {
-                uint256 oldTotal = moi.avgLongPrice * moi.longOI;
-                uint256 removal = pos.averagePrice * pos.size;
-                uint256 newOI = moi.longOI - pos.size;
-                moi.avgLongPrice = oldTotal > removal ? (oldTotal - removal) / newOI : 0;
-            }
+            moi.sumLongInvEntry -= pos.size * PRECISION / pos.averagePrice;
             moi.longOI -= pos.size;
+            moi.sumLongEntryFunding -= int256(pos.size) * pos.entryFundingIndex;
         } else {
-            if (moi.shortOI == pos.size) {
-                moi.avgShortPrice = 0; // Last short — reset
-            } else {
-                uint256 oldTotal = moi.avgShortPrice * moi.shortOI;
-                uint256 removal = pos.averagePrice * pos.size;
-                uint256 newOI = moi.shortOI - pos.size;
-                moi.avgShortPrice = oldTotal > removal ? (oldTotal - removal) / newOI : 0;
-            }
+            moi.sumShortInvEntry -= pos.size * PRECISION / pos.averagePrice;
             moi.shortOI -= pos.size;
+            moi.sumShortEntryFunding -= int256(pos.size) * pos.entryFundingIndex;
         }
 
         // --- Settle PnL and distribute funds ---
@@ -992,12 +1151,20 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             traderReceives = _fromInternalPrecision(uint256(equity));
         }
 
-        // Liquidation bounty: 1% of traderReceives, deducted from the trader's payout
+        // Liquidation bounty: a fixed fraction (1%) of the position's COLLATERAL, not of
+        // remaining equity. Basing it on collateral keeps liquidating an underwater/bankrupt
+        // position (equity ≤ 0) profitable, so the permissionless backstop has an incentive to
+        // clear bad debt rather than leaving it to bleed LPs. When the trader has positive
+        // equity they fund the bounty from their payout; otherwise it is paid from the
+        // collateral the vault retains on a bankrupt close (a small, bounded LP cost).
         uint256 bounty;
         bool isProtocolLiquidation = _isLiquidation && _liquidator == liquidationForwarder;
-        if (_isLiquidation && traderReceives > 0) {
-            bounty = (traderReceives * LIQUIDATION_BOUNTY_RATIO) / PRECISION;
-            traderReceives -= bounty;
+        if (_isLiquidation) {
+            bounty = (collateral * LIQUIDATION_BOUNTY_RATIO) / PRECISION;
+            if (traderReceives >= bounty) {
+                traderReceives -= bounty; // solvent-enough: trader funds their own bounty
+            }
+            // else: bounty is covered by the retained collateral (vault/LP), traderReceives kept
         }
 
         MarketVault vault = cfg.vault;
@@ -1023,11 +1190,9 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         // Emit appropriate event(s)
         if (_isLiquidation) {
             if (isProtocolLiquidation) {
-                // Forwarder liquidation: bounty stays in vault → emit yield amount for tracking
-                uint256 yieldCaptured = traderReceives > 0
-                    ? ((_fromInternalPrecision(uint256(equity)) * LIQUIDATION_BOUNTY_RATIO) / PRECISION)
-                    : 0;
-                emit AutomatedLiquidation(_trader, _marketId, yieldCaptured);
+                // Forwarder liquidation: the bounty is not paid out, it stays in the vault as
+                // protocol yield → emit the retained amount (the collateral-based bounty).
+                emit AutomatedLiquidation(_trader, _marketId, bounty);
             }
             emit PositionLiquidated(_trader, _marketId, _liquidator, bounty, markPrice);
         } else {
@@ -1070,17 +1235,52 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///      This protects LPs from excessive exposure: if the vault holds 100k cNGN and
     ///      `maxOIMultiplier` is 5×, total OI across both sides is capped at 500k cNGN.
     ///
-    ///      Uses the vault's raw token balance (not `totalAssets()`) because `totalAssets`
-    ///      already subtracts collateral/PnL, which would make the cap too restrictive.
+    ///      The cap is measured against LP-provided liquidity only. From the vault's raw balance
+    ///      we subtract (a) trader collateral (`marketCollateralHeld`, trader-owned) and (b) any
+    ///      net unrealized trader PROFIT, which is already owed out to winning traders and is not
+    ///      free LP capital — so the cap tightens precisely when the vault is least solvent.
+    ///      Unrealized trader losses are NOT added back (they are unrealized and may reverse).
+    ///      `markPrice` is the fresh price already fetched by `executeTrade`, so the check stays
+    ///      oracle-call-free here and cannot revert on a stale feed.
+    ///
+    ///      NOTE (residual): the raw balance is still a spot read, so liquidity that is deposited
+    ///      and then withdrawn in a later transaction (transient/flash LP) can momentarily lift
+    ///      the cap, since OI is only validated at open. Fully closing that requires sticky-
+    ///      liquidity accounting (e.g. a min-over-window or lock on LP withdrawal) — tracked
+    ///      separately; this function bounds the cap to current solvency, not future withdrawals.
     ///
     /// @param _marketId       The market being traded.
     /// @param _cfg            Storage reference to the market's config.
     /// @param _additionalSize The notional size of the new position (PRECISION).
-    function _checkOICap(bytes32 _marketId, MarketConfig storage _cfg, uint256 _additionalSize) internal view {
+    /// @param _markPrice      Fresh mark price already fetched by the caller (PRECISION).
+    function _checkOICap(bytes32 _marketId, MarketConfig storage _cfg, uint256 _additionalSize, uint256 _markPrice)
+        internal
+        view
+    {
         MarketOI storage moi = marketOI[_marketId];
         uint256 totalOI = moi.longOI + moi.shortOI + _additionalSize;
-        uint256 vaultTVL = _toInternalPrecision(IERC20(_cfg.vault.asset()).balanceOf(address(_cfg.vault)));
-        uint256 maxOI = (vaultTVL * _cfg.maxOIMultiplier) / PRECISION;
+
+        // LP-available liquidity = raw vault balance − trader collateral held for this market.
+        uint256 rawBalance = _toInternalPrecision(IERC20(_cfg.vault.asset()).balanceOf(address(_cfg.vault)));
+        uint256 collateralHeld = _toInternalPrecision(marketCollateralHeld[_marketId]);
+        uint256 lpLiquidity = rawBalance > collateralHeld ? rawBalance - collateralHeld : 0;
+
+        // Subtract unrealized trader PRICE profit only (already owed to traders). We deliberately
+        // use the price-only PnL, NOT `_marketUnrealizedPnL` (which is net of funding): funding is
+        // a zero-sum transfer between traders, not LP capital, so it must not move the solvency
+        // denominator. `_marketPricePnL` returns PRECISION (18 dec), matching `lpLiquidity`. Only
+        // positive (trader-owed) PnL reduces free LP capital; unrealized losses are not added back.
+        int256 pricePnL = _marketPricePnL(moi, _markPrice);
+        if (pricePnL > 0) {
+            uint256 owedToTraders = uint256(pricePnL);
+            lpLiquidity = lpLiquidity > owedToTraders ? lpLiquidity - owedToTraders : 0;
+        }
+
+        // Cap = min(absolute governance ceiling, TVL-multiple). The absolute ceiling is the hard
+        // bound that flash/transient LP liquidity cannot lift (it is independent of vault balance);
+        // the TVL-multiple is the secondary, liquidity-relative limit. The tighter of the two wins.
+        uint256 maxOI = (lpLiquidity * _cfg.maxOIMultiplier) / PRECISION;
+        if (_cfg.maxOpenInterest < maxOI) maxOI = _cfg.maxOpenInterest;
         if (totalOI > maxOI) revert ExceedsMaxOI();
     }
 
@@ -1132,10 +1332,10 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         return uint256(equity) * PRECISION < cfg.maintenanceMarginRatio * pos.size;
     }
 
-    /// @notice Calculate the aggregate unrealized PnL for all open positions in a market.
-    /// @dev Uses volume-weighted average entry prices for efficiency — no per-position iteration.
-    ///      Result is in cNGN token precision (6 decimals). Positive = traders collectively
-    ///      winning (vault liability). Used by `MarketVault.totalAssets()` to adjust share price.
+    /// @notice Calculate the aggregate unrealized PnL (net of funding) for all open positions.
+    /// @dev Uses inverse-entry accumulators (`sum*InvEntry`) for an exact closed-form aggregate —
+    ///      no per-position iteration. Result is in cNGN token precision (6 decimals). Positive =
+    ///      traders collectively winning (vault liability). Used by `MarketVault.totalAssets()`.
     /// @param _marketId The market to query.
     /// @return Net unrealized PnL (6 decimals). Positive = traders in profit.
     function getMarketUnrealizedPnL(bytes32 _marketId) external view returns (int256) {
@@ -1144,37 +1344,89 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         return _marketUnrealizedPnL(_marketId, _getMarkPrice(_marketId));
     }
 
-    /// @dev Internal aggregate unrealized PnL calculation.
+    /// @notice Oracle-independent variant of {getMarketUnrealizedPnL} for read-only fallback.
+    /// @dev Uses the cached `lastMarkPrice` instead of a live oracle read, so it never reverts on
+    ///      a stale feed. `MarketVault.totalAssets()` falls back to this so previews/getters keep
+    ///      working during oracle downtime. NOTE: this does NOT keep value-moving LP actions
+    ///      available — `deposit`/`mint`/`withdraw`/`redeem` are all gated on a FRESH price and
+    ///      revert during downtime while open interest exists, so no LP can enter OR exit at a
+    ///      stale share price. This getter is for informational reads only.
+    /// @param _marketId The market to query.
+    /// @return Net unrealized PnL (6 decimals) computed from the last cached mark price.
+    function getMarketUnrealizedPnLSafe(bytes32 _marketId) external view returns (int256) {
+        MarketOI storage moi = marketOI[_marketId];
+        if (moi.longOI == 0 && moi.shortOI == 0) return 0;
+        uint256 cached = lastMarkPrice[_marketId];
+        if (cached == 0) return 0; // No cached price yet — treat as no adjustment
+        return _marketUnrealizedPnL(_marketId, cached);
+    }
+
+    /// @dev Internal aggregate unrealized PnL calculation, **net of pending funding**.
     ///
-    ///      For each side (long / short), PnL is computed from the weighted average entry
-    ///      price rather than iterating individual positions. This is gas-efficient and
-    ///      mathematically equivalent because PnL is linear in price:
+    ///      PnL is `Σ size_i·(mark − entry_i)/entry_i`, which is NON-linear (reciprocal) in the
+    ///      entry price, so a volume-weighted ARITHMETIC mean entry price is invalid. Instead we
+    ///      maintain `sum*InvEntry = Σ(size_i × PRECISION / entry_i)` per side and use the exact
+    ///      closed form (no per-position iteration):
     ///
-    ///        longPnL  = longOI  × (markPrice − avgLongPrice)  / avgLongPrice
-    ///        shortPnL = shortOI × (avgShortPrice − markPrice) / avgShortPrice
-    ///        totalPnL = longPnL + shortPnL
+    ///        longPnL  = mark × Σ(size_i/entry_i) − longOI     = mark·sumLongInvEntry/P  − longOI
+    ///        shortPnL = shortOI − mark × Σ(size_i/entry_i)    = shortOI − mark·sumShortInvEntry/P
+    ///        totalPnL = longPnL + shortPnL − aggregatePendingFunding
     ///
-    ///      The result is converted from PRECISION (18 dec) to token precision (6 dec).
+    ///      Funding is netted in so that vault share pricing reflects funding accrued while
+    ///      positions are open. Funding is zero-sum between traders, but settlement happens
+    ///      per position, so between a payer's close and a receiver's close there is real
+    ///      outstanding funding sitting in the vault; subtracting it here keeps `totalAssets()`
+    ///      from over- or under-stating LP-available assets.
+    ///
+    ///      The result is the net amount owed to traders above their collateral, in token
+    ///      precision (6 dec). Positive = traders winning (vault liability).
     ///
     /// @param _marketId  The market to compute PnL for.
     /// @param markPrice  Pre-fetched mark price (avoids double oracle call).
-    /// @return Net unrealized PnL in cNGN token precision (6 decimals).
+    /// @return Net unrealized PnL (price PnL − funding) in cNGN token precision (6 decimals).
     function _marketUnrealizedPnL(bytes32 _marketId, uint256 markPrice) internal view returns (int256) {
         MarketOI storage moi = marketOI[_marketId];
         if (moi.longOI == 0 && moi.shortOI == 0) return 0;
 
-        int256 totalPnL;
+        // Net of pending funding (positive = traders owe traders less; negative = LPs are owed).
+        int256 totalPnL = _marketPricePnL(moi, markPrice) - _aggregatePendingFunding(moi);
 
-        if (moi.longOI > 0 && moi.avgLongPrice > 0) {
-            int256 priceDelta = int256(markPrice) - int256(moi.avgLongPrice);
-            totalPnL += int256(moi.longOI) * priceDelta / int256(moi.avgLongPrice);
-        }
-        if (moi.shortOI > 0 && moi.avgShortPrice > 0) {
-            int256 priceDelta = int256(moi.avgShortPrice) - int256(markPrice);
-            totalPnL += int256(moi.shortOI) * priceDelta / int256(moi.avgShortPrice);
-        }
+        // Cap the LP credit from trader LOSSES at recoverable collateral. When traders are losing
+        // (totalPnL < 0), LPs gain — but only up to the collateral traders actually posted; the
+        // excess is uncollectible bad debt that must NOT inflate `totalAssets()` / share price.
+        int256 minPnL = -int256(_toInternalPrecision(marketCollateralHeld[_marketId]));
+        if (totalPnL < minPnL) totalPnL = minPnL;
 
         return _toTokenPnL(totalPnL);
+    }
+
+    /// @dev Price-only aggregate unrealized PnL (EXCLUDES funding), in PRECISION (18 dec).
+    ///      `Σ size_i·(mark − entry_i)/entry_i`, non-linear (reciprocal) in entry, computed in
+    ///      closed form from the inverse-entry accumulators:
+    ///        longPnL  = mark·sumLongInvEntry/P  − longOI
+    ///        shortPnL = shortOI − mark·sumShortInvEntry/P
+    ///      Used by `_marketUnrealizedPnL` (then netted with funding) and by `_checkOICap` (which
+    ///      needs price-only profit, since funding is a trader-to-trader transfer, not LP capital).
+    function _marketPricePnL(MarketOI storage moi, uint256 markPrice) internal view returns (int256 totalPnL) {
+        if (moi.longOI > 0) {
+            totalPnL += int256(markPrice) * int256(moi.sumLongInvEntry) / int256(PRECISION) - int256(moi.longOI);
+        }
+        if (moi.shortOI > 0) {
+            totalPnL += int256(moi.shortOI) - int256(markPrice) * int256(moi.sumShortInvEntry) / int256(PRECISION);
+        }
+    }
+
+    /// @dev Aggregate pending funding across all open positions in a market, in PRECISION (18 dec).
+    ///      Positive = traders collectively owe funding; negative = traders are collectively owed.
+    ///      Computed from side accumulators without per-position iteration:
+    ///        longsPending  = (longOI  × longIndex  − sumLongEntryFunding)  / PRECISION
+    ///        shortsPending = (shortOI × shortIndex − sumShortEntryFunding) / PRECISION
+    ///      Uses funding indices projected to `block.timestamp` so views are current.
+    function _aggregatePendingFunding(MarketOI storage moi) internal view returns (int256) {
+        (int256 longIndex, int256 shortIndex) = _currentFundingIndices(moi);
+        int256 longs = (int256(moi.longOI) * longIndex - moi.sumLongEntryFunding) / int256(PRECISION);
+        int256 shorts = (int256(moi.shortOI) * shortIndex - moi.sumShortEntryFunding) / int256(PRECISION);
+        return longs + shorts;
     }
 
     /// @notice Get the current USD/NGN exchange rate from the Chainlink feed.
@@ -1306,7 +1558,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
         MarketOI storage moi = marketOI[_marketId];
         info.longOI = moi.longOI;
         info.shortOI = moi.shortOI;
-        info.fundingIndex = moi.fundingIndex;
+        (info.longFundingIndex, info.shortFundingIndex) = _currentFundingIndices(moi);
 
         // Vault & liquidity
         info.vaultTVL = cfg.vault.totalAssets();
@@ -1484,7 +1736,9 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
     ///          (see `_closePosition` for the `isProtocolLiquidation` logic).
     ///
     /// @param performData ABI-encoded `(bytes32[] markets, address[] traders)` from `checkUpkeep`.
-    function performUpkeep(bytes calldata performData) external override nonReentrant whenNotPaused {
+    // NOTE: intentionally NOT `whenNotPaused` — automated liquidation is the LP-solvency backstop
+    // and must remain available during a pause (still gated on a fresh oracle via `_refreshMarkPrice`).
+    function performUpkeep(bytes calldata performData) external override nonReentrant {
         if (msg.sender != liquidationForwarder) revert OnlyForwarder();
 
         (bytes32[] memory markets, address[] memory traders) = abi.decode(performData, (bytes32[], address[]));
@@ -1501,7 +1755,7 @@ contract PerpDEX is ReentrancyGuard, AccessManaged, Pausable, AutomationCompatib
             if (mid != lastMarket) {
                 lastMarket = mid;
                 _updateFunding(mid);
-                cachedMarkPrice = _getMarkPrice(mid);
+                cachedMarkPrice = _refreshMarkPrice(mid);
             }
 
             Position storage pos = positions[mid][trader];

@@ -20,7 +20,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 ///        3.  totalAssets with unrealized PnL (decreases with profit, formula check, floor at zero)
 ///        4.  Share price after PnL settlement (trade cycle)
 ///        5.  Multi-depositor share accounting (proportional shares, dynamic pricing after PnL)
-///        6.  Vault access control (setPerpDex, settlePnL, payTrader, receiveFromTrader)
+///        6.  Vault access control (setPerpDex, settlePnL, payTrader)
 ///        7.  Vault metadata (asset address, decimals, name, symbol)
 ///        8.  Vault isolation between markets
 ///        9.  totalAssets after full trade cycle
@@ -60,10 +60,12 @@ contract VaultForkTest is BaseForkSetup {
 
         vm.startPrank(lpProvider);
         uint256 tokensBefore = cNGN.balanceOf(lpProvider);
-        ethVault.withdraw(withdrawAmount, lpProvider, lpProvider);
+        uint256 wShares = ethVault.previewWithdraw(withdrawAmount);
+        ethVault.requestRedeem(wShares); // cooldown 0 in fork setup → claim immediately
+        ethVault.claimRedeem();
         uint256 tokensAfter = cNGN.balanceOf(lpProvider);
 
-        assertEq(tokensAfter - tokensBefore, withdrawAmount, "Should receive exact tokens");
+        assertApproxEqAbs(tokensAfter - tokensBefore, withdrawAmount, 1, "Should receive ~exact tokens");
         vm.stopPrank();
     }
 
@@ -78,7 +80,8 @@ contract VaultForkTest is BaseForkSetup {
         uint256 shares = ethVault.deposit(depositAmount, lpProvider2);
 
         uint256 tokensBefore = cNGN.balanceOf(lpProvider2);
-        ethVault.redeem(shares, lpProvider2, lpProvider2);
+        ethVault.requestRedeem(shares); // cooldown 0 in fork setup → claim immediately
+        ethVault.claimRedeem();
         uint256 tokensAfter = cNGN.balanceOf(lpProvider2);
 
         uint256 received = tokensAfter - tokensBefore;
@@ -95,7 +98,7 @@ contract VaultForkTest is BaseForkSetup {
     /// @notice First depositor should get 1:1 share ratio (in cNGN terms).
     function test_initialShareRatio() public {
         // Deploy a fresh vault with no deposits
-        MarketVault freshVault = new MarketVault(cNGN, address(sam), keccak256("FRESH"), "Fresh Vault", "vFRESH");
+        MarketVault freshVault = new MarketVault(cNGN, address(sam), keccak256("FRESH"), "Fresh Vault", "vFRESH", 0);
 
         uint256 depositAmount = 1_000_000e6;
         _dealcNGN(lpProvider2, depositAmount);
@@ -162,7 +165,7 @@ contract VaultForkTest is BaseForkSetup {
     /// @notice totalAssets floors at zero (never negative).
     function test_totalAssets_floorsAtZero() public {
         // Deploy a vault with minimal liquidity
-        MarketVault tinyVault = new MarketVault(cNGN, address(sam), keccak256("TINY"), "Tiny Vault", "vTINY");
+        MarketVault tinyVault = new MarketVault(cNGN, address(sam), keccak256("TINY"), "Tiny Vault", "vTINY", 0);
 
         // No PerpDEX linked — uses fallback
         // globalTraderPnL = 0, balance = 0
@@ -206,7 +209,7 @@ contract VaultForkTest is BaseForkSetup {
 
     /// @notice Multiple LPs deposit, shares are proportional.
     function test_multiDepositor_proportionalShares() public {
-        MarketVault freshVault = new MarketVault(cNGN, address(sam), keccak256("MULTI"), "Multi Vault", "vMULTI");
+        MarketVault freshVault = new MarketVault(cNGN, address(sam), keccak256("MULTI"), "Multi Vault", "vMULTI", 0);
 
         uint256 deposit1 = 1_000_000e6;
         uint256 deposit2 = 2_000_000e6;
@@ -292,13 +295,6 @@ contract VaultForkTest is BaseForkSetup {
         vm.prank(trader1);
         vm.expectRevert(MarketVault.OnlyPerpDex.selector);
         ethVault.payTrader(trader1, 1000);
-    }
-
-    /// @notice receiveFromTrader can only be called by PerpDEX.
-    function test_receiveFromTrader_onlyPerpDex_reverts() public {
-        vm.prank(trader1);
-        vm.expectRevert(MarketVault.OnlyPerpDex.selector);
-        ethVault.receiveFromTrader(trader1, 1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -394,7 +390,7 @@ contract VaultForkTest is BaseForkSetup {
     /// @notice Vault with no PerpDEX linked uses fallback totalAssets.
     function test_totalAssets_fallback_noPerpDex() public {
         MarketVault unlinkedVault =
-            new MarketVault(cNGN, address(sam), keccak256("UNLINKED"), "Unlinked Vault", "vUNLINK");
+            new MarketVault(cNGN, address(sam), keccak256("UNLINKED"), "Unlinked Vault", "vUNLINK", 0);
 
         uint256 depositAmount = 1_000_000e6;
         _dealcNGN(lpProvider2, depositAmount);
@@ -412,23 +408,21 @@ contract VaultForkTest is BaseForkSetup {
        11. WITHDRAW MORE THAN AVAILABLE — REVERT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Cannot withdraw more than available assets.
-    function test_withdraw_exceedsAvailable_reverts() public {
-        uint256 vaultAssets = ethVault.totalAssets();
-
+    /// @notice Instant ERC4626 withdraw is disabled — exits go through requestRedeem/claimRedeem.
+    function test_instantWithdraw_disabled() public {
         vm.startPrank(lpProvider);
-        vm.expectRevert(); // ERC4626: withdraw more than max
-        ethVault.withdraw(vaultAssets + 1e6, lpProvider, lpProvider);
+        vm.expectRevert(MarketVault.UseRequestRedeem.selector);
+        ethVault.withdraw(1e6, lpProvider, lpProvider);
         vm.stopPrank();
     }
 
-    /// @notice Cannot redeem more shares than owned.
-    function test_redeem_exceedsBalance_reverts() public {
+    /// @notice Cannot request to redeem more shares than owned (escrow transfer reverts).
+    function test_requestRedeem_exceedsBalance_reverts() public {
         uint256 shares = ethVault.balanceOf(lpProvider);
 
         vm.startPrank(lpProvider);
-        vm.expectRevert(); // ERC20: insufficient balance
-        ethVault.redeem(shares + 1, lpProvider, lpProvider);
+        vm.expectRevert(); // ERC20: insufficient balance on escrow transfer
+        ethVault.requestRedeem(shares + 1);
         vm.stopPrank();
     }
 

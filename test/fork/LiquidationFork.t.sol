@@ -401,11 +401,12 @@ contract LiquidationForkTest is BaseForkSetup {
     }
 
     /*//////////////////////////////////////////////////////////////
-      9. PAUSE BLOCKS LIQUIDATION
+      9. PAUSE DOES NOT BLOCK LIQUIDATION (LP-solvency backstop)
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Public liquidation is blocked when paused.
-    function test_pause_blocksPublicLiquidation() public {
+    /// @notice Public liquidation is NOT gated by pause — a paused protocol still liquidates a
+    ///         healthy position only by reverting NotLiquidatable, never EnforcedPause. (Fix #2.)
+    function test_pause_doesNotBlockPublicLiquidation() public {
         _refreshEthPrices();
 
         _openMaxLeveragePosition(trader1, ETH_MARKET, 100_000e6);
@@ -413,13 +414,15 @@ contract LiquidationForkTest is BaseForkSetup {
         vm.prank(operator);
         perp.pause();
 
+        // The pause guard is gone: a fresh (healthy) position reverts NotLiquidatable, proving the
+        // call reached the liquidation logic rather than being blocked by EnforcedPause.
         vm.prank(liquidator);
-        vm.expectRevert(); // EnforcedPause
+        vm.expectRevert(PerpDEX.NotLiquidatable.selector);
         perp.liquidate(ETH_MARKET, trader1);
     }
 
-    /// @notice performUpkeep is blocked when paused.
-    function test_pause_blocksPerformUpkeep() public {
+    /// @notice performUpkeep is NOT gated by pause (empty batch succeeds as a no-op). (Fix #2.)
+    function test_pause_doesNotBlockPerformUpkeep() public {
         vm.prank(operator);
         perp.pause();
 
@@ -427,8 +430,8 @@ contract LiquidationForkTest is BaseForkSetup {
         address[] memory traders = new address[](0);
         bytes memory performData = abi.encode(markets, traders);
 
+        // Must NOT revert with EnforcedPause — automated liquidation stays available during a pause.
         vm.prank(forwarder);
-        vm.expectRevert(); // EnforcedPause
         perp.performUpkeep(performData);
     }
 

@@ -53,6 +53,11 @@ contract PerpDEXTest is Test {
     /// @dev Maximum price age in seconds for the mock Pyth oracle.
     uint256 constant MAX_STALENESS = 120;
 
+    /// @dev Absolute OI ceiling for tests — set effectively unbounded so the TVL-multiplier
+    ///      remains the binding cap in existing tests; the absolute-cap path is exercised
+    ///      separately via updateMarketParams in its own test.
+    uint256 constant MAX_OI = type(uint256).max;
+
     /*//////////////////////////////////////////////////////////////
                             STATE
     //////////////////////////////////////////////////////////////*/
@@ -108,8 +113,8 @@ contract PerpDEXTest is Test {
         sam.grantRole(sam.PAUSER_ROLE(), operator, 0);
         vm.stopPrank();
 
-        // 4. Deploy PerpDEX
-        perp = new PerpDEX(address(cNGN), address(mockPyth), mockNgnUsdFeed, MAX_STALENESS, address(sam));
+        // 4. Deploy PerpDEX (sequencer feed disabled with address(0) for unit tests)
+        perp = new PerpDEX(address(cNGN), address(mockPyth), mockNgnUsdFeed, MAX_STALENESS, address(sam), address(0));
 
         // Mock Chainlink NGN/USD feed decimals (constant for all tests)
         vm.mockCall(
@@ -118,9 +123,9 @@ contract PerpDEXTest is Test {
 
         // 5. Deploy MarketVaults
         ethVault =
-            new MarketVault(IERC20(address(cNGN)), address(sam), ETH_MARKET, "cNGN Vault Share - ETH", "vcNGN-ETH");
+            new MarketVault(IERC20(address(cNGN)), address(sam), ETH_MARKET, "cNGN Vault Share - ETH", "vcNGN-ETH", 0);
         btcVault =
-            new MarketVault(IERC20(address(cNGN)), address(sam), BTC_MARKET, "cNGN Vault Share - BTC", "vcNGN-BTC");
+            new MarketVault(IERC20(address(cNGN)), address(sam), BTC_MARKET, "cNGN Vault Share - BTC", "vcNGN-BTC", 0);
 
         // 6. Configure SAM function roles for PerpDEX
         vm.startPrank(admin);
@@ -132,10 +137,11 @@ contract PerpDEXTest is Test {
         marketMgrSelectors[2] = PerpDEX.updateMarketParams.selector;
         sam.setTargetFunctionRole(address(perp), marketMgrSelectors, sam.MARKET_MANAGER_ROLE());
 
-        bytes4[] memory operatorSelectors = new bytes4[](3);
+        bytes4[] memory operatorSelectors = new bytes4[](4);
         operatorSelectors[0] = PerpDEX.setUsdNgnFeed.selector;
         operatorSelectors[1] = PerpDEX.setForwarder.selector;
-        operatorSelectors[2] = PerpDEX.unpause.selector;
+        operatorSelectors[2] = PerpDEX.disableForwarder.selector;
+        operatorSelectors[3] = PerpDEX.unpause.selector;
         sam.setTargetFunctionRole(address(perp), operatorSelectors, sam.OPERATOR_ROLE());
 
         bytes4[] memory pauserSelectors = new bytes4[](1);
@@ -163,11 +169,12 @@ contract PerpDEXTest is Test {
             5, // 5x leverage
             2e16, // 2% maintenance margin
             5e18, // 5x OI cap
+            MAX_OI, // absolute OI ceiling (unbounded in tests)
             PerpDEX.MarketType.Crypto,
             address(ethVault)
         );
         perp.addMarket(
-            BTC_MARKET, BTC_USD_FEED, MAX_STALENESS, 5, 2e16, 5e18, PerpDEX.MarketType.Crypto, address(btcVault)
+            BTC_MARKET, BTC_USD_FEED, MAX_STALENESS, 5, 2e16, 5e18, MAX_OI, PerpDEX.MarketType.Crypto, address(btcVault)
         );
         vm.stopPrank();
 
@@ -240,7 +247,11 @@ contract PerpDEXTest is Test {
         uint256 leverage
     ) internal {
         bytes32 salt = keccak256(abi.encode(trader, block.number));
-        bytes32 orderHash = keccak256(abi.encode(trader, marketId, side, collateral, leverage, salt));
+        // Opt out of the slippage bound (max for long, 0 for short) and use a far deadline.
+        uint256 acceptablePrice = side == PerpDEX.Side.Long ? type(uint256).max : 0;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash =
+            keccak256(abi.encode(trader, marketId, side, collateral, leverage, acceptablePrice, deadline, salt));
 
         vm.prank(trader);
         perp.requestTrade(orderHash);
@@ -253,7 +264,7 @@ contract PerpDEXTest is Test {
         _setDefaultPrices();
 
         vm.prank(trader);
-        perp.executeTrade(marketId, side, collateral, leverage, salt);
+        perp.executeTrade(marketId, side, collateral, leverage, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -273,7 +284,38 @@ contract PerpDEXTest is Test {
         vm.prank(operator);
         vm.expectRevert(PerpDEX.MarketAlreadyExists.selector);
         perp.addMarket(
-            ETH_MARKET, ETH_USD_FEED, MAX_STALENESS, 5, 2e16, 5e18, PerpDEX.MarketType.Crypto, address(ethVault)
+            ETH_MARKET, ETH_USD_FEED, MAX_STALENESS, 5, 2e16, 5e18, MAX_OI, PerpDEX.MarketType.Crypto, address(ethVault)
+        );
+    }
+
+    /// @notice A disabled market ID can never be re-added (market IDs are immutable once used).
+    function test_addMarket_readd_after_disable_reverts() public {
+        vm.startPrank(operator);
+        perp.disableMarket(ETH_MARKET);
+
+        // Even with the market disabled, re-adding the same ID must revert — re-adding would
+        // overwrite the config (incl. vault) while stale positions/OI/collateral persist.
+        vm.expectRevert(PerpDEX.MarketAlreadyExists.selector);
+        perp.addMarket(
+            ETH_MARKET, ETH_USD_FEED, MAX_STALENESS, 5, 2e16, 5e18, MAX_OI, PerpDEX.MarketType.Crypto, address(ethVault)
+        );
+        vm.stopPrank();
+    }
+
+    /// @notice addMarket rejects a zero Pyth feed ID (the contract-wide existence sentinel).
+    function test_addMarket_zeroFeedId_reverts() public {
+        vm.prank(operator);
+        vm.expectRevert(PerpDEX.InvalidParameters.selector);
+        perp.addMarket(
+            keccak256("NEW-PERP"),
+            bytes32(0),
+            MAX_STALENESS,
+            5,
+            2e16,
+            5e18,
+            MAX_OI,
+            PerpDEX.MarketType.Crypto,
+            address(ethVault)
         );
     }
 
@@ -288,6 +330,7 @@ contract PerpDEXTest is Test {
             3,
             2e16,
             5e18,
+            MAX_OI,
             PerpDEX.MarketType.Commodity,
             address(ethVault)
         );
@@ -305,7 +348,7 @@ contract PerpDEXTest is Test {
     /// @notice updateMarketParams updates leverage, MMR, OI multiplier, and staleness.
     function test_updateMarketParams() public {
         vm.prank(operator);
-        perp.updateMarketParams(ETH_MARKET, 10, 3e16, 3e18, 60);
+        perp.updateMarketParams(ETH_MARKET, 10, 3e16, 3e18, MAX_OI, 60);
 
         (, uint256 staleness, uint256 maxLev, uint256 mmr, uint256 oiMult,,,) = perp.getMarketConfig(ETH_MARKET);
         assertEq(maxLev, 10);
@@ -390,6 +433,18 @@ contract PerpDEXTest is Test {
         assertEq(balBefore - balAfter, 1);
     }
 
+    /// @notice updatePythPrices reverts when msg.value is below the Pyth fee (fee must come from
+    ///         the caller, never the contract's own ETH balance). (Fix #4.)
+    function test_updatePythPrices_insufficientFee_reverts() public {
+        bytes[] memory updateData = new bytes[](1);
+        updateData[0] = mockPyth.createPriceFeedUpdateData(
+            ETH_USD_FEED, 3000e8, 10e8, CRYPTO_EXPO, 3000e8, 10e8, uint64(block.timestamp), uint64(block.timestamp - 1)
+        );
+        // MockPyth fee = 1 wei per update; sending 0 must revert rather than spend contract ETH.
+        vm.expectRevert(PerpDEX.InsufficientFee.selector);
+        perp.updatePythPrices{value: 0}(updateData);
+    }
+
     /// @notice OPERATOR can change the Chainlink NGN/USD feed address and staleness.
     function test_setUsdNgnFeed() public {
         address newFeed = makeAddr("newFeed");
@@ -397,6 +452,39 @@ contract PerpDEXTest is Test {
         perp.setUsdNgnFeed(newFeed, 60);
         assertEq(address(perp.ngnUsdChainlinkFeed()), newFeed);
         assertEq(perp.usdNgnMaxStaleness(), 60);
+    }
+
+    /// @notice setUsdNgnFeed rejects the zero address.
+    function test_setUsdNgnFeed_zeroAddress_reverts() public {
+        vm.prank(operator);
+        vm.expectRevert(PerpDEX.ZeroAddress.selector);
+        perp.setUsdNgnFeed(address(0), 60);
+    }
+
+    /// @notice setUsdNgnFeed rejects a zero staleness window.
+    function test_setUsdNgnFeed_zeroStaleness_reverts() public {
+        vm.prank(operator);
+        vm.expectRevert(PerpDEX.InvalidParameters.selector);
+        perp.setUsdNgnFeed(makeAddr("newFeed"), 0);
+    }
+
+    /// @notice setForwarder rejects the zero address (use disableForwarder() to turn off automation).
+    function test_setForwarder_zeroAddress_reverts() public {
+        vm.prank(operator);
+        vm.expectRevert(PerpDEX.ZeroAddress.selector);
+        perp.setForwarder(address(0));
+    }
+
+    /// @notice disableForwarder explicitly clears the forwarder.
+    function test_disableForwarder_clearsForwarder() public {
+        address forwarder = makeAddr("forwarder");
+        vm.startPrank(operator);
+        perp.setForwarder(forwarder);
+        assertEq(perp.liquidationForwarder(), forwarder);
+
+        perp.disableForwarder();
+        assertEq(perp.liquidationForwarder(), address(0));
+        vm.stopPrank();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -432,7 +520,11 @@ contract PerpDEXTest is Test {
         bytes32 salt = keccak256("salt");
         uint256 collateral = 100_000e6;
         uint256 leverage = 6; // exceeds 5x max
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, leverage, salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, leverage, acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -442,7 +534,7 @@ contract PerpDEXTest is Test {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.ExceedsMaxLeverage.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, leverage, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, leverage, acceptablePrice, deadline, salt);
     }
 
     /// @notice Opening a second position in the same market reverts with PositionAlreadyOpen.
@@ -453,7 +545,11 @@ contract PerpDEXTest is Test {
         // Try to open another position in same market
         bytes32 salt = keccak256("salt2");
         uint256 collateral = 50_000e6;
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -463,7 +559,7 @@ contract PerpDEXTest is Test {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.PositionAlreadyOpen.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, salt);
     }
 
     /// @notice Executing in the same block as commit reverts with TooEarlyToExecute.
@@ -471,7 +567,11 @@ contract PerpDEXTest is Test {
         _setDefaultPrices();
         bytes32 salt = keccak256("salt");
         uint256 collateral = 100_000e6;
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -479,7 +579,7 @@ contract PerpDEXTest is Test {
         // Don't advance blocks — try to execute immediately
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.TooEarlyToExecute.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, salt);
     }
 
     /// @notice Executing after MAX_BLOCK_DELAY blocks reverts with OrderExpired.
@@ -487,7 +587,11 @@ contract PerpDEXTest is Test {
         _setDefaultPrices();
         bytes32 salt = keccak256("salt");
         uint256 collateral = 100_000e6;
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -499,7 +603,7 @@ contract PerpDEXTest is Test {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.OrderExpired.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, salt);
     }
 
     /// @notice Revealing with a wrong salt produces a hash mismatch → OrderHashMismatch.
@@ -507,7 +611,11 @@ contract PerpDEXTest is Test {
         _setDefaultPrices();
         bytes32 salt = keccak256("salt");
         uint256 collateral = 100_000e6;
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -518,7 +626,7 @@ contract PerpDEXTest is Test {
         // Reveal with different salt
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.OrderHashMismatch.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, keccak256("wrong"));
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, keccak256("wrong"));
     }
 
     /// @notice Trading on a disabled market reverts with MarketNotEnabled.
@@ -529,7 +637,11 @@ contract PerpDEXTest is Test {
 
         bytes32 salt = keccak256("salt");
         uint256 collateral = 100_000e6;
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -539,7 +651,81 @@ contract PerpDEXTest is Test {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.MarketNotEnabled.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, salt);
+    }
+
+    /// @notice A Long reveal with an acceptablePrice below the mark price reverts (slippage bound).
+    function test_executeTrade_slippageExceeded_long_reverts() public {
+        _setDefaultPrices();
+        bytes32 salt = keccak256("slip");
+        uint256 collateral = 100_000e6;
+        uint256 acceptablePrice = 1; // far below the ~4.8M cNGN mark → Long must revert
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
+
+        vm.prank(trader1);
+        perp.requestTrade(orderHash);
+        vm.roll(block.number + 2);
+        vm.warp(block.timestamp + 2);
+        _setDefaultPrices();
+
+        vm.prank(trader1);
+        vm.expectRevert(PerpDEX.SlippageExceeded.selector);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, salt);
+    }
+
+    /// @notice Revealing after the committed deadline reverts with DeadlineExceeded.
+    function test_executeTrade_deadlineExceeded_reverts() public {
+        _setDefaultPrices();
+        bytes32 salt = keccak256("dl");
+        uint256 collateral = 100_000e6;
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1; // expires almost immediately
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(2), acceptablePrice, deadline, salt)
+        );
+
+        vm.prank(trader1);
+        perp.requestTrade(orderHash);
+        vm.roll(block.number + 2); // satisfy block window
+        vm.warp(block.timestamp + 100); // past the deadline
+        _setDefaultPrices();
+
+        vm.prank(trader1);
+        vm.expectRevert(PerpDEX.DeadlineExceeded.selector);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 2, acceptablePrice, deadline, salt);
+    }
+
+    /// @notice When the L2 sequencer reports down, price reads revert with SequencerDown.
+    function test_sequencer_down_reverts() public {
+        vm.warp(1_000_000);
+        address seqFeed = makeAddr("seqDown");
+        vm.mockCall(
+            seqFeed,
+            abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
+            abi.encode(uint80(1), int256(1), block.timestamp - 7200, block.timestamp, uint80(1)) // answer 1 = down
+        );
+        PerpDEX p2 = new PerpDEX(address(cNGN), address(mockPyth), mockNgnUsdFeed, MAX_STALENESS, address(sam), seqFeed);
+
+        vm.expectRevert(PerpDEX.SequencerDown.selector);
+        p2.getUsdNgnRate();
+    }
+
+    /// @notice Within the grace period after sequencer recovery, price reads still revert.
+    function test_sequencer_gracePeriod_reverts() public {
+        vm.warp(1_000_000);
+        address seqFeed = makeAddr("seqGrace");
+        vm.mockCall(
+            seqFeed,
+            abi.encodeWithSelector(AggregatorV3Interface.latestRoundData.selector),
+            abi.encode(uint80(1), int256(0), block.timestamp - 100, block.timestamp, uint80(1)) // up, but recovered 100s ago
+        );
+        PerpDEX p2 = new PerpDEX(address(cNGN), address(mockPyth), mockNgnUsdFeed, MAX_STALENESS, address(sam), seqFeed);
+
+        vm.expectRevert(PerpDEX.SequencerGracePeriodNotElapsed.selector);
+        p2.getUsdNgnRate();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -677,6 +863,30 @@ contract PerpDEXTest is Test {
         assertEq(pos.size, 0);
     }
 
+    /// @notice A bankrupt (equity ≤ 0) position still pays the liquidator a collateral-based
+    ///         bounty, so the permissionless backstop is incentivized to clear bad debt. (Fix #1.)
+    function test_liquidation_bankrupt_still_pays_bounty() public {
+        _setDefaultPrices();
+        _commitAndExecuteTrade(trader1, ETH_MARKET, PerpDEX.Side.Long, 100_000e6, 5);
+
+        // Crash ETH 3000 → 2300 so the 5× long is underwater past its collateral (equity < 0).
+        vm.warp(block.timestamp + 5);
+        _setPythPrice(ETH_USD_FEED, 2300e8, CRYPTO_EXPO, 10e8);
+        _mockChainlinkNgnUsd(62500);
+
+        assertTrue(perp.isLiquidatable(ETH_MARKET, trader1));
+        assertLt(perp.getPositionEquity(ETH_MARKET, trader1), int256(0), "position should be bankrupt");
+
+        uint256 before = cNGN.balanceOf(liquidator);
+        vm.prank(liquidator);
+        perp.liquidate(ETH_MARKET, trader1);
+        uint256 received = cNGN.balanceOf(liquidator) - before;
+
+        // bounty = 1% of collateral = 100_000e6 / 100 = 1_000e6, paid even though equity ≤ 0.
+        // (The old equity-based bounty would have paid 0 here.)
+        assertEq(received, 1_000e6, "liquidator must earn collateral-based bounty on bankrupt close");
+    }
+
     /// @notice Liquidating a healthy position reverts with NotLiquidatable.
     function test_liquidation_not_liquidatable_reverts() public {
         _setDefaultPrices();
@@ -798,7 +1008,11 @@ contract PerpDEXTest is Test {
 
         bytes32 salt = keccak256("oi_cap_salt");
         uint256 collateral = 50_000_000e6; // 50M collateral * 5x = 250M >> 25M cap
-        bytes32 orderHash = keccak256(abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(5), salt));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(5), acceptablePrice, deadline, salt)
+        );
 
         vm.prank(trader1);
         perp.requestTrade(orderHash);
@@ -808,7 +1022,36 @@ contract PerpDEXTest is Test {
 
         vm.prank(trader1);
         vm.expectRevert(PerpDEX.ExceedsMaxOI.selector);
-        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 5, salt);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 5, acceptablePrice, deadline, salt);
+    }
+
+    /// @notice Absolute OI ceiling binds even when the TVL-multiplier would allow more — a hard
+    ///         cap that transient/flash liquidity cannot lift. (Fix #2a.)
+    function test_OI_absoluteCap_binds() public {
+        _setDefaultPrices();
+
+        // Tighten the absolute ceiling to 1,000,000 cNGN while the TVL-multiplier still allows
+        // 25,000,000 (5M LP × 5×). A 1,500,000 position is within the multiplier but over the cap.
+        vm.prank(operator);
+        perp.updateMarketParams(ETH_MARKET, 5, 2e16, 5e18, 1_000_000e18, MAX_STALENESS);
+
+        bytes32 salt = keccak256("abs_cap_salt");
+        uint256 collateral = 300_000e6; // 300k × 5× = 1,500,000 internal OI > 1,000,000 absolute cap
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader1, ETH_MARKET, PerpDEX.Side.Long, collateral, uint256(5), acceptablePrice, deadline, salt)
+        );
+
+        vm.prank(trader1);
+        perp.requestTrade(orderHash);
+        vm.roll(block.number + 2);
+        vm.warp(block.timestamp + 2);
+        _setDefaultPrices();
+
+        vm.prank(trader1);
+        vm.expectRevert(PerpDEX.ExceedsMaxOI.selector);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, 5, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -829,6 +1072,74 @@ contract PerpDEXTest is Test {
         int256 equity = perp.getPositionEquity(ETH_MARKET, trader1);
         // At entry, equity ≈ collateral (no PnL yet, minimal funding)
         assertApproxEqAbs(equity, int256(uint256(100_000e6)), 100); // within 100 units of token precision
+    }
+
+    /// @notice Funding is zero-sum between traders: what the dominant side pays, the minority
+    ///         side receives. Mark price is held constant so price PnL is zero and equity
+    ///         changes are pure funding. (Regression for the zero-sum funding redesign.)
+    function test_funding_isZeroSum_betweenTraders() public {
+        _setDefaultPrices();
+
+        // Long-heavy, two-sided: longOI = 500k, shortOI = 250k (internal precision).
+        _commitAndExecuteTrade(trader1, ETH_MARKET, PerpDEX.Side.Long, 100_000e6, 5);
+        _commitAndExecuteTrade(trader2, ETH_MARKET, PerpDEX.Side.Short, 50_000e6, 5);
+
+        // Accrue funding over time with the price unchanged (refresh oracle timestamps only).
+        vm.warp(block.timestamp + 100); // < 120s staleness
+        _setDefaultPrices();
+
+        int256 eqLong = perp.getPositionEquity(ETH_MARKET, trader1);
+        int256 eqShort = perp.getPositionEquity(ETH_MARKET, trader2);
+
+        // Price PnL is zero, so funding = collateral − equity (token precision).
+        int256 fundingLong = int256(uint256(100_000e6)) - eqLong; // > 0 : long pays
+        int256 fundingShort = int256(uint256(50_000e6)) - eqShort; // < 0 : short receives
+
+        assertGt(fundingLong, 0, "long should pay funding when long-heavy");
+        assertLt(fundingShort, 0, "short should receive funding when long-heavy");
+
+        // Zero-sum: longs pay exactly what shorts receive, within integer-rounding dust.
+        assertApproxEqAbs(fundingLong, -fundingShort, 5, "funding must be zero-sum between traders");
+    }
+
+    /// @dev Open a Long on ETH at a specific ETH/USD price (commit-reveal, slippage opt-out).
+    function _openLongEthAt(address trader, uint256 collateral, uint256 leverage, int64 ethUsd) internal {
+        bytes32 salt = keccak256(abi.encode(trader, block.number, ethUsd));
+        uint256 acceptablePrice = type(uint256).max;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash = keccak256(
+            abi.encode(trader, ETH_MARKET, PerpDEX.Side.Long, collateral, leverage, acceptablePrice, deadline, salt)
+        );
+        vm.prank(trader);
+        perp.requestTrade(orderHash);
+        vm.roll(block.number + 2);
+        vm.warp(block.timestamp + 2);
+        _setPythPrice(ETH_USD_FEED, ethUsd, CRYPTO_EXPO, uint64(uint64(ethUsd) / 100));
+        _mockChainlinkNgnUsd(62500);
+        vm.prank(trader);
+        perp.executeTrade(ETH_MARKET, PerpDEX.Side.Long, collateral, leverage, acceptablePrice, deadline, salt);
+    }
+
+    /// @notice Aggregate unrealized PnL uses the exact per-position sum (harmonic accumulator),
+    ///         not a volume-weighted arithmetic mean of entry prices. (Finding 1 fix.)
+    /// @dev Two equal longs at ETH=$3000 and $4000, marked at $3500:
+    ///      true PnL = 200k·(3500−3000)/3000 + 200k·(3500−4000)/4000 ≈ +8,333 cNGN.
+    ///      The buggy arithmetic-mean formula (avg entry $3500) would report 0.
+    function test_marketUnrealizedPnL_harmonic_not_arithmetic() public {
+        _openLongEthAt(trader1, 100_000e6, 2, 3000e8); // entry mark = 3000·1600 = 4.8M cNGN
+        _openLongEthAt(trader2, 100_000e6, 2, 4000e8); // entry mark = 4000·1600 = 6.4M cNGN
+
+        // Mark the market at ETH=$3500 (5.6M cNGN) with a fresh oracle.
+        // Advance time so MockPyth accepts the new publishTime (it ignores same-timestamp updates).
+        vm.warp(block.timestamp + 1);
+        _setPythPrice(ETH_USD_FEED, 3500e8, CRYPTO_EXPO, 35e8);
+        _mockChainlinkNgnUsd(62500);
+
+        assertEq(perp.getMarkPrice(ETH_MARKET), 5_600_000e18, "mark should be 5.6M cNGN");
+        int256 pnl = perp.getMarketUnrealizedPnL(ETH_MARKET);
+        // ≈ +8,333.33 cNGN (6-dec). Buggy arithmetic-mean code returns ~0.
+        assertApproxEqAbs(pnl, int256(8_333e6), 5e6, "aggregate PnL must equal true per-position sum");
+        assertGt(pnl, int256(8_000e6), "must be materially positive, not the arithmetic-mean 0");
     }
 
     /// @notice getMarketVaultTVL returns the vault’s totalAssets (5M from setup).
@@ -1012,6 +1323,43 @@ contract PerpDEXTest is Test {
 
         int256 pnl = perp.getMarketUnrealizedPnL(ETH_MARKET);
         assertGt(pnl, 0, "PnL should be positive after price increase");
+    }
+
+    /// @notice Aggregate trader loss credited to LPs is capped at recoverable collateral, so
+    ///         uncollectible bad debt cannot inflate vault NAV. (Fix #1b.)
+    function test_marketUnrealizedPnL_baddebt_clamped() public {
+        _setDefaultPrices();
+        _commitAndExecuteTrade(trader1, ETH_MARKET, PerpDEX.Side.Long, 100_000e6, 5); // size 500k, collateral 100k
+
+        // Crash ETH 3000 → 1500: raw long loss ≈ 250k cNGN, far exceeding the 100k collateral.
+        vm.warp(block.timestamp + 1);
+        _setPythPrice(ETH_USD_FEED, 1500e8, CRYPTO_EXPO, 15e8);
+        _mockChainlinkNgnUsd(62500);
+
+        int256 pnl = perp.getMarketUnrealizedPnL(ETH_MARKET);
+        // Uncapped would be ≈ -250_000e6; clamped at -collateralHeld = -100_000e6.
+        assertEq(pnl, -int256(uint256(100_000e6)), "LP credit from losses must cap at collateral");
+    }
+
+    /// @notice Liquidation remains available while the protocol is paused (LP-solvency backstop). (Fix #2.)
+    function test_liquidate_works_while_paused() public {
+        _setDefaultPrices();
+        _commitAndExecuteTrade(trader1, ETH_MARKET, PerpDEX.Side.Long, 100_000e6, 5);
+
+        // Drop ETH to make the position liquidatable (~1.67% margin < 2%).
+        vm.warp(block.timestamp + 5);
+        _setPythPrice(ETH_USD_FEED, 2450e8, CRYPTO_EXPO, 10e8);
+        _mockChainlinkNgnUsd(62500);
+        assertTrue(perp.isLiquidatable(ETH_MARKET, trader1));
+
+        // Pause the protocol.
+        vm.prank(operator);
+        perp.pause();
+
+        // Liquidation must still succeed despite the pause.
+        vm.prank(liquidator);
+        perp.liquidate(ETH_MARKET, trader1);
+        assertEq(perp.getPosition(ETH_MARKET, trader1).size, 0, "position liquidated while paused");
     }
 
     /*//////////////////////////////////////////////////////////////

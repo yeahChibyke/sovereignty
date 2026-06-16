@@ -42,6 +42,7 @@ abstract contract BaseForkSetup is Test {
     address constant CNGN_ADDRESS = 0x46C85152bFe9f96829aA94755D9f915F9B10EF5F;
     address constant PYTH_ADDRESS = 0x8250f4aF4B972684F7b336503E2D6dFeDeB1487a;
     address constant NGN_USD_CHAINLINK = 0xdfbb5Cbc88E382de007bfe6CE99C388176ED80aD;
+    address constant SEQUENCER_UPTIME_FEED = 0xBCF85224fc0756B9Fa45aA7892530B47e10b6433;
 
     /*//////////////////////////////////////////////////////////////
                          PYTH FEED IDS
@@ -87,13 +88,21 @@ abstract contract BaseForkSetup is Test {
     uint256 constant METAL_MAX_STALENESS = 300;
     uint256 constant EQUITY_MAX_STALENESS = 300;
     uint256 constant FX_MAX_STALENESS = 600;
-    uint256 constant USD_NGN_STALENESS = 3600;
+    // Generous NGN/USD staleness for FORK TESTS ONLY. Fork tests read the REAL Base Chainlink
+    // NGN/USD feed (a forex feed with a long, irregular heartbeat) and several tests `vm.warp`
+    // forward; with the production 3600s window, a test that runs while the live feed is near its
+    // heartbeat would intermittently revert `StaleChainlinkPrice()` on a price read it expects to
+    // succeed. The staleness *behavior* is covered deterministically by the unit tests (mocked
+    // feed); production deploys 3600s (see DeployPerpDEX). 365 days here removes the live-feed
+    // timing dependency without affecting the per-market Pyth staleness tests.
+    uint256 constant USD_NGN_STALENESS = 365 days;
 
     uint256 constant CRYPTO_MAX_LEVERAGE = 5;
     uint256 constant NON_CRYPTO_MAX_LEVERAGE = 3;
 
     uint256 constant MAINTENANCE_MARGIN = 2e16; // 2%
     uint256 constant OI_MULTIPLIER = 5e18; // 5x
+    uint256 constant MAX_OPEN_INTEREST = type(uint256).max; // absolute OI ceiling (unbounded for fork tests)
     uint256 constant PRECISION = 1e18;
 
     /*//////////////////////////////////////////////////////////////
@@ -160,12 +169,14 @@ abstract contract BaseForkSetup is Test {
         vm.stopPrank();
 
         // 4. Deploy PerpDEX with real Pyth + Chainlink NGN/USD
-        perp = new PerpDEX(CNGN_ADDRESS, PYTH_ADDRESS, NGN_USD_CHAINLINK, USD_NGN_STALENESS, address(sam));
+        perp = new PerpDEX(
+            CNGN_ADDRESS, PYTH_ADDRESS, NGN_USD_CHAINLINK, USD_NGN_STALENESS, address(sam), SEQUENCER_UPTIME_FEED
+        );
 
         // 5. Deploy MarketVaults for crypto markets
-        ethVault = new MarketVault(cNGN, address(sam), ETH_MARKET, "cNGN Vault Share - ETH", "vcNGN-ETH");
-        btcVault = new MarketVault(cNGN, address(sam), BTC_MARKET, "cNGN Vault Share - BTC", "vcNGN-BTC");
-        solVault = new MarketVault(cNGN, address(sam), SOL_MARKET, "cNGN Vault Share - SOL", "vcNGN-SOL");
+        ethVault = new MarketVault(cNGN, address(sam), ETH_MARKET, "cNGN Vault Share - ETH", "vcNGN-ETH", 0);
+        btcVault = new MarketVault(cNGN, address(sam), BTC_MARKET, "cNGN Vault Share - BTC", "vcNGN-BTC", 0);
+        solVault = new MarketVault(cNGN, address(sam), SOL_MARKET, "cNGN Vault Share - SOL", "vcNGN-SOL", 0);
 
         // 6. Configure SAM roles
         vm.startPrank(admin);
@@ -208,6 +219,7 @@ abstract contract BaseForkSetup is Test {
             CRYPTO_MAX_LEVERAGE,
             MAINTENANCE_MARGIN,
             OI_MULTIPLIER,
+            MAX_OPEN_INTEREST,
             PerpDEX.MarketType.Crypto,
             address(ethVault)
         );
@@ -218,6 +230,7 @@ abstract contract BaseForkSetup is Test {
             CRYPTO_MAX_LEVERAGE,
             MAINTENANCE_MARGIN,
             OI_MULTIPLIER,
+            MAX_OPEN_INTEREST,
             PerpDEX.MarketType.Crypto,
             address(btcVault)
         );
@@ -228,6 +241,7 @@ abstract contract BaseForkSetup is Test {
             CRYPTO_MAX_LEVERAGE,
             MAINTENANCE_MARGIN,
             OI_MULTIPLIER,
+            MAX_OPEN_INTEREST,
             PerpDEX.MarketType.Crypto,
             address(solVault)
         );
@@ -355,7 +369,11 @@ abstract contract BaseForkSetup is Test {
         uint256 leverage
     ) internal {
         bytes32 salt = keccak256(abi.encode(trader, block.number, block.timestamp));
-        bytes32 orderHash = keccak256(abi.encode(trader, marketId, side, collateral, leverage, salt));
+        // Opt out of the slippage bound (max for long, 0 for short) and use a far deadline.
+        uint256 acceptablePrice = side == PerpDEX.Side.Long ? type(uint256).max : 0;
+        uint256 deadline = block.timestamp + 1 days;
+        bytes32 orderHash =
+            keccak256(abi.encode(trader, marketId, side, collateral, leverage, acceptablePrice, deadline, salt));
 
         vm.prank(trader);
         perp.requestTrade(orderHash);
@@ -364,7 +382,7 @@ abstract contract BaseForkSetup is Test {
         vm.roll(block.number + 2);
 
         vm.prank(trader);
-        perp.executeTrade(marketId, side, collateral, leverage, salt);
+        perp.executeTrade(marketId, side, collateral, leverage, acceptablePrice, deadline, salt);
     }
 
     /*//////////////////////////////////////////////////////////////

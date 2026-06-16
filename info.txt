@@ -40,10 +40,15 @@ USD/NGN = "0x2f1601cdfed62c03d39fce4720f5d53e8517af244915fbd24ce8175bb25ab318"  
 EUR/NGN = "0xda57c298043bde9adf2d7760bde2f5da7fae58518c9e641259c40b12e70463bf"  Exponent: -5  (optional, future use)
 GBP/NGN = "0x3c486f6cb5ea7d068117c328ba233f6153b69cee472260366972b50591558de6"  Exponent: -5  (optional, future use)
 
-Leverage as at deployment (open to changes because contracts are upgradeable.. yes/no?)
+Leverage as at deployment (tunable per-market via PerpDEX.updateMarketParams; note: PerpDEX and
+MarketVault are NOT upgradeable — only SovereigntyAccessManager is a UUPS proxy):
 Crypto: 5x
+Commodity: 3x
 Metal: 3x
 Equity: 3x
 Forex: 3x
+
+Base L2 Sequencer Uptime feed (checked before consuming the NGN/USD price):
+SEQUENCER_UPTIME = "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
 
 

@@ -229,9 +229,9 @@ contract PythOracleForkTest is BaseForkSetup {
     ///         but doesn't fail if feeds have no recent data.
     function test_nonCryptoFeeds_integration() public {
         // Deploy vaults and add non-crypto markets
-        MarketVault brentVault = new MarketVault(cNGN, address(sam), BRENT_MARKET, "vcNGN-BRENT", "vcNGN-BRENT");
-        MarketVault xauVault = new MarketVault(cNGN, address(sam), XAU_MARKET, "vcNGN-XAU", "vcNGN-XAU");
-        MarketVault eurVault = new MarketVault(cNGN, address(sam), EUR_MARKET, "vcNGN-EUR", "vcNGN-EUR");
+        MarketVault brentVault = new MarketVault(cNGN, address(sam), BRENT_MARKET, "vcNGN-BRENT", "vcNGN-BRENT", 0);
+        MarketVault xauVault = new MarketVault(cNGN, address(sam), XAU_MARKET, "vcNGN-XAU", "vcNGN-XAU", 0);
+        MarketVault eurVault = new MarketVault(cNGN, address(sam), EUR_MARKET, "vcNGN-EUR", "vcNGN-EUR", 0);
 
         vm.startPrank(admin);
         bytes4[] memory vaultMgrSels = new bytes4[](1);
@@ -253,6 +253,7 @@ contract PythOracleForkTest is BaseForkSetup {
             NON_CRYPTO_MAX_LEVERAGE,
             MAINTENANCE_MARGIN,
             OI_MULTIPLIER,
+            MAX_OPEN_INTEREST,
             PerpDEX.MarketType.Commodity,
             address(brentVault)
         );
@@ -263,6 +264,7 @@ contract PythOracleForkTest is BaseForkSetup {
             NON_CRYPTO_MAX_LEVERAGE,
             MAINTENANCE_MARGIN,
             OI_MULTIPLIER,
+            MAX_OPEN_INTEREST,
             PerpDEX.MarketType.Metal,
             address(xauVault)
         );
@@ -273,6 +275,7 @@ contract PythOracleForkTest is BaseForkSetup {
             NON_CRYPTO_MAX_LEVERAGE,
             MAINTENANCE_MARGIN,
             OI_MULTIPLIER,
+            MAX_OPEN_INTEREST,
             PerpDEX.MarketType.FX,
             address(eurVault)
         );

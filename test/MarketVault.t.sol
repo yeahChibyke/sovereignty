@@ -18,7 +18,7 @@ import {MockPerpDEX} from "./mocks/MockPerpDEX.sol";
 ///        - Basic ERC4626: deposit, withdraw, redeem, multi-depositor
 ///        - totalAssets with PnL: trader profit (decreases LP assets), trader loss
 ///          (increases LP assets), floor-at-zero guard
-///        - Access control: setPerpDex, settlePnL, payTrader, receiveFromTrader
+///        - Access control: setPerpDex, settlePnL, payTrader
 ///        - PnL settlement: positive and negative globalTraderPnL tracking
 ///        - Metadata: name, symbol, decimals, marketId, asset
 ///        - Fallback: totalAssets when no PerpDEX is linked
@@ -55,7 +55,8 @@ contract MarketVaultTest is Test {
         vm.stopPrank();
 
         // Deploy vault
-        vault = new MarketVault(IERC20(address(cNGN)), address(sam), MARKET_ID, "cNGN Vault Share - ETH", "vcNGN-ETH");
+        vault =
+            new MarketVault(IERC20(address(cNGN)), address(sam), MARKET_ID, "cNGN Vault Share - ETH", "vcNGN-ETH", 0);
 
         // Deploy mock PerpDEX
         mockPerp = new MockPerpDEX();
@@ -95,12 +96,16 @@ contract MarketVaultTest is Test {
     }
 
     /// @notice LP withdraws 50k cNGN after depositing 100k — half remains in vault.
+    /// @dev Uses the request→claim flow (cooldown 0 in this vault → claim immediately).
     function test_withdraw() public {
         vm.prank(lp1);
         vault.deposit(100_000e6, lp1);
 
+        uint256 shares = vault.previewWithdraw(50_000e6);
         vm.prank(lp1);
-        vault.withdraw(50_000e6, lp1, lp1);
+        vault.requestRedeem(shares);
+        vm.prank(lp1);
+        vault.claimRedeem();
 
         assertEq(cNGN.balanceOf(address(vault)), 50_000e6);
     }
@@ -111,7 +116,9 @@ contract MarketVaultTest is Test {
         uint256 shares = vault.deposit(100_000e6, lp1);
 
         vm.prank(lp1);
-        uint256 assets = vault.redeem(shares, lp1, lp1);
+        vault.requestRedeem(shares);
+        vm.prank(lp1);
+        uint256 assets = vault.claimRedeem();
 
         assertEq(assets, 100_000e6);
         assertEq(vault.balanceOf(lp1), 0);
@@ -182,6 +189,32 @@ contract MarketVaultTest is Test {
         assertEq(vault.totalAssets(), 0);
     }
 
+    /// @notice Deposit/mint revert while the vault is insolvent (NAV clamped to 0, shares
+    ///         outstanding) — prevents value-free share minting. (Fix #1a.)
+    function test_deposit_blocked_when_insolvent() public {
+        vm.prank(lp1);
+        vault.deposit(100_000e6, lp1);
+
+        // Push LP NAV ≤ 0 → totalAssets clamps to 0 with totalSupply > 0.
+        mockPerp.setCollateralHeld(MARKET_ID, 0);
+        mockPerp.setUnrealizedPnL(MARKET_ID, 200_000e6);
+        assertEq(vault.totalAssets(), 0);
+
+        vm.prank(lp2);
+        vm.expectRevert(MarketVault.VaultInsolvent.selector);
+        vault.deposit(1, lp2);
+
+        vm.prank(lp2);
+        vm.expectRevert(MarketVault.VaultInsolvent.selector);
+        vault.mint(1_000_000e6, lp2);
+
+        // Once NAV recovers (traders no longer winning), deposits resume.
+        mockPerp.setUnrealizedPnL(MARKET_ID, 0);
+        vm.prank(lp2);
+        uint256 shares = vault.deposit(50_000e6, lp2);
+        assertGt(shares, 0);
+    }
+
     /*//////////////////////////////////////////////////////////////
                        ACCESS CONTROL TESTS
     //////////////////////////////////////////////////////////////*/
@@ -212,13 +245,6 @@ contract MarketVaultTest is Test {
         vm.prank(lp1);
         vm.expectRevert(MarketVault.OnlyPerpDex.selector);
         vault.payTrader(lp1, 1000);
-    }
-
-    /// @notice receiveFromTrader can only be called by the linked PerpDEX.
-    function test_receiveFromTrader_onlyPerpDex() public {
-        vm.prank(lp1);
-        vm.expectRevert(MarketVault.OnlyPerpDex.selector);
-        vault.receiveFromTrader(lp1, 1000);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -276,9 +302,155 @@ contract MarketVaultTest is Test {
     /// @notice Without a linked PerpDEX, totalAssets falls back to raw cNGN balance.
     function test_totalAssets_fallback_no_perpdex() public {
         // Deploy a fresh vault with no PerpDEX linked
-        MarketVault freshVault = new MarketVault(IERC20(address(cNGN)), address(sam), MARKET_ID, "Fresh", "FRESH");
+        MarketVault freshVault = new MarketVault(IERC20(address(cNGN)), address(sam), MARKET_ID, "Fresh", "FRESH", 0);
 
         cNGN.mint(address(freshVault), 100_000e6);
         assertEq(freshVault.totalAssets(), 100_000e6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+              STALE-ORACLE LP LIVENESS (FINDING 04)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice When the live oracle reverts, totalAssets falls back to the cached-price variant.
+    function test_totalAssets_usesFallback_when_oracle_stale() public {
+        vm.prank(lp1);
+        vault.deposit(500_000e6, lp1);
+        cNGN.mint(address(vault), 100_000e6);
+        mockPerp.setCollateralHeld(MARKET_ID, 100_000e6);
+        mockPerp.setUnrealizedPnL(MARKET_ID, 50_000e6);
+
+        uint256 fresh = vault.totalAssets(); // 600k − 100k − 50k = 450k
+        assertEq(fresh, 450_000e6);
+
+        // Live read now reverts; totalAssets must fall back (same mock value) instead of reverting.
+        mockPerp.setOracleStale(true);
+        assertEq(vault.totalAssets(), 450_000e6);
+    }
+
+    /// @notice Deposits are blocked while the oracle is stale (no entry at a stale share price).
+    function test_deposit_blocked_when_oracle_stale() public {
+        vm.prank(lp1);
+        vault.deposit(100_000e6, lp1);
+
+        mockPerp.setCollateralHeld(MARKET_ID, 50_000e6);
+        mockPerp.setUnrealizedPnL(MARKET_ID, 10_000e6);
+        mockPerp.setOracleStale(true);
+
+        vm.prank(lp1);
+        vm.expectRevert(MockPerpDEX.MockOracleStale.selector);
+        vault.deposit(10_000e6, lp1);
+    }
+
+    /// @notice Withdrawals are blocked while the oracle is stale and the market has open interest,
+    ///         so an LP cannot exit at a stale (favorable) share price. (Finding 2 fix.)
+    function test_withdraw_blocked_when_oracle_stale() public {
+        vm.prank(lp1);
+        vault.deposit(100_000e6, lp1);
+
+        uint256 shares = vault.previewWithdraw(50_000e6);
+        vm.prank(lp1);
+        vault.requestRedeem(shares);
+
+        // Simulate open interest + stale live oracle at claim time.
+        mockPerp.setUnrealizedPnL(MARKET_ID, 10_000e6);
+        mockPerp.setOracleStale(true);
+
+        vm.prank(lp1);
+        vm.expectRevert(MockPerpDEX.MockOracleStale.selector);
+        vault.claimRedeem();
+    }
+
+    /// @notice Claims succeed when the live oracle is fresh.
+    function test_withdraw_allowed_when_oracle_fresh() public {
+        vm.prank(lp1);
+        vault.deposit(100_000e6, lp1);
+
+        uint256 shares = vault.previewWithdraw(50_000e6);
+        vm.prank(lp1);
+        vault.requestRedeem(shares);
+
+        // oracleStale defaults to false → _requireFreshPricing passes.
+        vm.prank(lp1);
+        vault.claimRedeem();
+        assertEq(cNGN.balanceOf(address(vault)), 50_000e6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+              WITHDRAWAL COOLDOWN (REQUEST → CLAIM)
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev A vault with a real cooldown, no PerpDEX linked (claim has no oracle dependency).
+    function _cooldownVault(uint256 cooldown) internal returns (MarketVault v) {
+        v = new MarketVault(IERC20(address(cNGN)), address(sam), MARKET_ID, "CD", "CD", cooldown);
+        vm.prank(lp1);
+        cNGN.approve(address(v), type(uint256).max);
+    }
+
+    /// @notice Instant ERC4626 withdraw/redeem are disabled — must use the request flow.
+    function test_instantWithdrawRedeem_disabled() public {
+        vm.prank(lp1);
+        vault.deposit(100_000e6, lp1);
+
+        vm.prank(lp1);
+        vm.expectRevert(MarketVault.UseRequestRedeem.selector);
+        vault.withdraw(1, lp1, lp1);
+
+        vm.prank(lp1);
+        vm.expectRevert(MarketVault.UseRequestRedeem.selector);
+        vault.redeem(1, lp1, lp1);
+    }
+
+    /// @notice claimRedeem reverts before the cooldown elapses, succeeds after.
+    function test_claimRedeem_respects_cooldown() public {
+        MarketVault v = _cooldownVault(1 days);
+        vm.prank(lp1);
+        uint256 shares = v.deposit(100_000e6, lp1);
+
+        vm.prank(lp1);
+        v.requestRedeem(shares);
+
+        // Too early.
+        vm.prank(lp1);
+        vm.expectRevert(MarketVault.CooldownNotElapsed.selector);
+        v.claimRedeem();
+
+        // After cooldown → succeeds.
+        vm.warp(block.timestamp + 1 days + 1);
+        vm.prank(lp1);
+        uint256 assets = v.claimRedeem();
+        assertEq(assets, 100_000e6);
+        assertEq(v.balanceOf(lp1), 0);
+        assertEq(v.totalPendingWithdrawalShares(), 0);
+    }
+
+    /// @notice cancelRedeem returns the escrowed shares and clears the request.
+    function test_cancelRedeem_returns_shares() public {
+        MarketVault v = _cooldownVault(1 days);
+        vm.prank(lp1);
+        uint256 shares = v.deposit(100_000e6, lp1);
+
+        vm.prank(lp1);
+        v.requestRedeem(shares);
+        assertEq(v.balanceOf(lp1), 0, "shares escrowed");
+        assertEq(v.totalPendingWithdrawalShares(), shares);
+
+        vm.prank(lp1);
+        v.cancelRedeem();
+        assertEq(v.balanceOf(lp1), shares, "shares returned");
+        assertEq(v.totalPendingWithdrawalShares(), 0);
+    }
+
+    /// @notice A second request while one is pending reverts.
+    function test_requestRedeem_onePending() public {
+        MarketVault v = _cooldownVault(1 days);
+        vm.prank(lp1);
+        uint256 shares = v.deposit(100_000e6, lp1);
+
+        vm.prank(lp1);
+        v.requestRedeem(shares / 2);
+        vm.prank(lp1);
+        vm.expectRevert(MarketVault.WithdrawalAlreadyPending.selector);
+        v.requestRedeem(shares / 2);
     }
 }
